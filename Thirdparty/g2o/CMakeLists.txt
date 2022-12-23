@@ -181,3 +181,24 @@ g2o/stuff/string_tools.cpp
 g2o/stuff/property.cpp       
 g2o/stuff/property.h       
 )
+
+# Install headers
+install(
+  DIRECTORY g2o
+  DESTINATION include/${PROJECT_NAME}
+  FILES_MATCHING
+    PATTERN "*.h"
+    PATTERN "*.hpp"
+)
+install(
+  FILES config.h
+  DESTINATION include/${PROJECT_NAME}
+)
+
+# Install library
+install(
+  TARGETS
+    g2o
+  RUNTIME DESTINATION
+    lib/${PROJECT_NAME}
+)

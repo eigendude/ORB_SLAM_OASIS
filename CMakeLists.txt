@@ -387,3 +387,47 @@ if(realsense2_FOUND)
 endif()
 
 endif() # BUILD_EXAMLPES
+
+# Install headers and library
+install(
+  DIRECTORY
+    include/
+  DESTINATION
+    include/${PROJECT_NAME}
+)
+install(
+  TARGETS
+    ${PROJECT_NAME}
+  RUNTIME DESTINATION
+    lib/${PROJECT_NAME}
+)
+
+# ORBvoc extraction and install
+set(VOCAB_TXT ORBvoc.txt)
+set(VOCAB_ARCHIVE ${VOCAB_TXT}.tar.gz)
+
+set(VOCAB_ARCHIVE_PATH ${PROJECT_SOURCE_DIR}/Vocabulary/${VOCAB_ARCHIVE})
+set(VOCAB_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/Vocabulary)
+set(VOCAB_TXT_PATH ${VOCAB_BUILD_DIR}/${VOCAB_TXT})
+
+# Create build-side Vocabulary directory and extract the archive into it
+add_custom_command(
+  OUTPUT ${VOCAB_TXT_PATH}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${VOCAB_BUILD_DIR}
+  COMMAND ${CMAKE_COMMAND} -E chdir ${VOCAB_BUILD_DIR}
+          # Use CMake's portable tar helper (works on macOS/Linux/Windows)
+          ${CMAKE_COMMAND} -E tar xzf ${VOCAB_ARCHIVE_PATH}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${VOCAB_ARCHIVE_PATH}
+  COMMENT "Extracting ${VOCAB_TXT} from ${VOCAB_ARCHIVE}"
+  VERBATIM
+)
+
+# Build target for the vocabulary file
+add_custom_target(orb_vocab ALL DEPENDS ${VOCAB_TXT_PATH})
+
+# Install the Vocabulary directory
+install(
+  DIRECTORY ${VOCAB_BUILD_DIR}/
+  DESTINATION share/${PROJECT_NAME}/Vocabulary
+)
