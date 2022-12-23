@@ -42,8 +42,6 @@ ${EIGEN3_INCLUDE_DIR}
 ${Pangolin_INCLUDE_DIRS}
 )
 
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
-
 add_library(${PROJECT_NAME} SHARED
 src/System.cc
 src/Tracking.cc
@@ -104,7 +102,9 @@ include/SerializationUtils.h
 include/Config.h
 include/Settings.h)
 
+add_subdirectory(Thirdparty/DBoW2)
 add_subdirectory(Thirdparty/g2o)
+add_subdirectory(Thirdparty/Sophus)
 
 # Ensure g2o is built before linking ORB_SLAM3
 add_dependencies(${PROJECT_NAME} g2o)
