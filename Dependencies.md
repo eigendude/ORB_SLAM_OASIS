@@ -1,11 +1,11 @@
-##List of Known Dependencies
-###ORB-SLAM3 v1.1 (Modernized 2025)
+## List of Known Dependencies
+### ORB-SLAM3 v1.1 (Modernized 2025)
 
 In this document we list all the pieces of code included by ORB-SLAM3 and linked libraries which are not property of the authors of ORB-SLAM3.
 
 **Note**: This version has been modernized to use C++23 standard and latest library versions. All dependencies have been updated accordingly while maintaining compatibility and original licensing.
 
-#####Code in **src** and **include** folders
+##### Code in **src** and **include** folders
 
 * *ORBextractor.cc*.
 This is a modified version of orb.cpp of OpenCV library. The original code is BSD licensed.
@@ -22,7 +22,7 @@ The original code is BSD licensed.
 The code is from: http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetParallel.
 The code is in the public domain.
 
-#####Code in Thirdparty folder
+##### Code in Thirdparty folder
 
 * All code in **DBoW2** folder.
 This is a modified version of [DBoW2](https://github.com/dorian3d/DBoW2) and [DLib](https://github.com/dorian3d/DLib) library. All files included are BSD licensed.
@@ -36,7 +36,7 @@ This is a modified version of [g2o](https://github.com/RainerKuemmerle/g2o). All
 This is a modified version of [Sophus](https://github.com/strasdat/Sophus). [MIT license](https://en.wikipedia.org/wiki/MIT_License).
 **Modernization**: Updated for C++23 compatibility with warning suppressions for legacy template usage.
 
-#####Library dependencies 
+##### Library dependencies 
 
 * **Pangolin (visualization and user interface)**.
 [MIT license](https://en.wikipedia.org/wiki/MIT_License). 
