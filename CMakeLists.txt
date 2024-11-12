@@ -106,6 +106,9 @@ include/Settings.h)
 
 add_subdirectory(Thirdparty/g2o)
 
+# Ensure g2o is built before linking ORB_SLAM3
+add_dependencies(${PROJECT_NAME} g2o)
+
 target_link_libraries(${PROJECT_NAME}
 ${OpenCV_LIBS}
 ${EIGEN3_LIBS}
