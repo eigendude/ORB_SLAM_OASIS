@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ORB_SLAM3)
+project(ORB_SLAM_OASIS)
 
 option(BUILD_EXAMPLES "Build ORB_SLAM_OASIS examples" ON)
 
@@ -110,7 +110,7 @@ add_subdirectory(Thirdparty/DBoW2)
 add_subdirectory(Thirdparty/g2o)
 add_subdirectory(Thirdparty/Sophus)
 
-# Ensure g2o is built before linking ORB_SLAM3
+# Ensure g2o is built before linking ORB_SLAM_OASIS
 add_dependencies(${PROJECT_NAME} g2o)
 
 target_link_libraries(${PROJECT_NAME}
