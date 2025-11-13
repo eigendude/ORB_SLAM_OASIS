@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(ORB_SLAM3)
 
+option(BUILD_EXAMPLES "Build ORB_SLAM_OASIS examples" ON)
+
 IF(NOT CMAKE_BUILD_TYPE)
   SET(CMAKE_BUILD_TYPE Release)
 ENDIF()
@@ -128,6 +130,7 @@ endif()
 
 
 # Build examples
+if (BUILD_EXAMPLES)
 
 # RGB-D examples
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/RGB-D)
@@ -379,3 +382,5 @@ if(realsense2_FOUND)
             Examples_old/Stereo-Inertial/stereo_inertial_realsense_D435i.cc)
     target_link_libraries(stereo_inertial_realsense_D435i_old ${PROJECT_NAME})
 endif()
+
+endif() # BUILD_EXAMLPES
