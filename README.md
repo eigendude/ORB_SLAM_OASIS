@@ -1,3 +1,7 @@
+# ORB-SLAM-OASIS
+
+This is a third-party maintained fork of https://github.com/UZ-SLAMLab/ORB_SLAM3.  The official repository has been inactive for several years, and has accumulated many unresolved pull requests and nearly 500 unresolved issues.  Additionally there are numerous bugfixes and improvements scattered throughout the 2.5k+ forks on GitHub.  This fork builds on the *community consensus* version of ORB_SLAM3 (https://github.com/jeremysalwen/ORB_SLAM_COMMUNITY) that incorporates all of the best pieces that the community has created.
+
 # ORB-SLAM3
 
 ### V1.0, December 22th, 2021
