@@ -177,6 +177,10 @@ public:
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
     Atlas* GetAtlas() { return mpAtlas; }
+    // Returns true when the active inertial map has accepted IMU initialization.
+    bool IsImuInitialized() const;
+    // Returns true when local mapping has marked the active IMU map as bad.
+    bool HasBadImu() const;
 
     // For debugging
     double GetTimeFromIMUInit();

@@ -1336,6 +1336,28 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
     return mTrackedKeyPointsUn;
 }
 
+bool System::IsImuInitialized() const
+{
+    if(mSensor!=IMU_MONOCULAR && mSensor!=IMU_STEREO && mSensor!=IMU_RGBD)
+        return false;
+
+    if(mpAtlas==NULL)
+        return false;
+
+    return mpAtlas->isImuInitialized();
+}
+
+bool System::HasBadImu() const
+{
+    if(mSensor!=IMU_MONOCULAR && mSensor!=IMU_STEREO && mSensor!=IMU_RGBD)
+        return false;
+
+    if(mpLocalMapper==NULL)
+        return false;
+
+    return mpLocalMapper->mbBadImu;
+}
+
 double System::GetTimeFromIMUInit()
 {
     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
@@ -1546,4 +1568,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-
