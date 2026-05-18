@@ -36,8 +36,11 @@
 #include "g2o/solvers/linear_solver_dense.h"
 #include "G2oTypes.h"
 #include "Converter.h"
+#include "NumericChecks.h"
 
 #include<mutex>
+#include <cmath>
+#include <iostream>
 
 #include "OptimizableTypes.h"
 
@@ -813,6 +816,13 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
 
 int Optimizer::PoseOptimization(Frame *pFrame)
 {
+    const auto logInvalidPoseOptimizationState = [pFrame](const char *stage) {
+        NumericChecks::LogRejectedInvalidFrameState("pose optimization result",
+                                                    stage,
+                                                    pFrame->mnId,
+                                                    pFrame->mTimeStamp);
+    };
+
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
 
@@ -828,6 +838,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     // Set Frame vertex
     g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
     Sophus::SE3<float> Tcw = pFrame->GetPose();
+    if(!NumericChecks::IsFiniteSE3(Tcw))
+    {
+        logInvalidPoseOptimizationState("PoseOptimization/input");
+        return 0;
+    }
     vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
     vSE3->setId(0);
     vSE3->setFixed(false);
@@ -1006,6 +1021,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     for(size_t it=0; it<4; it++)
     {
         Tcw = pFrame->GetPose();
+        if(!NumericChecks::IsFiniteSE3(Tcw))
+        {
+            logInvalidPoseOptimizationState("PoseOptimization/iteration_input");
+            return 0;
+        }
         vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(),Tcw.translation().cast<double>()));
 
         optimizer.initializeOptimization(0);
@@ -1106,8 +1126,20 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     // Recover optimized pose and return number of inliers
     g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
     g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
+    if(!NumericChecks::IsFiniteSE3Parts(SE3quat_recov.rotation(), SE3quat_recov.translation()))
+    {
+        logInvalidPoseOptimizationState("PoseOptimization/recover");
+        return 0;
+    }
+
     Sophus::SE3<float> pose(SE3quat_recov.rotation().cast<float>(),
             SE3quat_recov.translation().cast<float>());
+    if(!NumericChecks::IsFiniteSE3(pose))
+    {
+        logInvalidPoseOptimizationState("PoseOptimization/recover_pose");
+        return 0;
+    }
+
     pFrame->SetPose(pose);
 
     return nInitialCorrespondences-nBad;

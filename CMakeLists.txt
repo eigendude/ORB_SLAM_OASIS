@@ -103,6 +103,7 @@ include/MLPnPsolver.h
 include/GeometricTools.h
 include/TwoViewReconstruction.h
 include/SerializationUtils.h
+include/NumericChecks.h
 include/Config.h
 include/Settings.h)
 

@@ -22,8 +22,10 @@
 #include <vector>
 #include <cmath>
 #include <opencv2/opencv.hpp>
+#include <iostream>
 
 #include "KeyFrame.h"
+#include "NumericChecks.h"
 #include "ORBmatcher.h"
 
 #include "Thirdparty/DBoW2/DUtils/Random.h"
@@ -185,7 +187,10 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
             vAvailableIndices.pop_back();
         }
 
-        ComputeSim3(P3Dc1i,P3Dc2i);
+        if(!ComputeSim3(P3Dc1i,P3Dc2i))
+        {
+            continue;
+        }
 
         CheckInliers();
 
@@ -258,7 +263,10 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
             vAvailableIndices.pop_back();
         }
 
-        ComputeSim3(P3Dc1i,P3Dc2i);
+        if(!ComputeSim3(P3Dc1i,P3Dc2i))
+        {
+            continue;
+        }
 
         CheckInliers();
 
@@ -308,8 +316,12 @@ void Sim3Solver::ComputeCentroid(Eigen::Matrix3f &P, Eigen::Matrix3f &Pr, Eigen:
 }
 
 
-void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
+bool Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 {
+    const auto logInvalidEstimate = [this](const char *stage, const Eigen::Vector3f &omega) {
+        NumericChecks::LogRejectedNonFiniteSim3RotationUpdate(stage, mpKF1->mnId, mpKF2->mnId, omega);
+    };
+
     // Custom implementation of:
     // Horn 1987, Closed-form solution of absolute orientataion using unit quaternions
 
@@ -356,6 +368,12 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
     Eigen::Vector4f eval = eigSolver.eigenvalues().real();
     Eigen::Matrix4f evec = eigSolver.eigenvectors().real(); //evec[0] is the quaternion of the desired rotation
 
+    if(!NumericChecks::IsFinite(eval) || !NumericChecks::IsFinite(evec))
+    {
+        logInvalidEstimate("Sim3Solver/eigensolver", Eigen::Vector3f::Zero());
+        return false;
+    }
+
     int maxIndex; // should be zero
     eval.maxCoeff(&maxIndex);
 
@@ -363,12 +381,36 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     // Rotation angle. sin is the norm of the imaginary part, cos is the real part
     double ang=atan2(vec.norm(),evec(0,maxIndex));
+    const float vecNorm = vec.norm();
 
-    vec = 2*ang*vec/vec.norm(); //Angle-axis representation. quaternion angle is the half
+    if(!NumericChecks::IsFinite(ang) || !NumericChecks::IsFinite(vecNorm) || vecNorm <= 1e-6f)
+    {
+        logInvalidEstimate("Sim3Solver/angle_axis", vec);
+        return false;
+    }
+
+    vec = 2*ang*vec/vecNorm; //Angle-axis representation. quaternion angle is the half
+    if(!NumericChecks::IsFinite(vec))
+    {
+        logInvalidEstimate("Sim3Solver/omega", vec);
+        return false;
+    }
+
     mR12i = Sophus::SO3f::exp(vec).matrix();
+    if(!NumericChecks::IsFinite(mR12i))
+    {
+        logInvalidEstimate("Sim3Solver/rotation", vec);
+        return false;
+    }
 
     // Step 5: Rotate set 2
     Eigen::Matrix3f P3 = mR12i*Pr2;
+
+    if(!NumericChecks::IsFinite(P3))
+    {
+        logInvalidEstimate("Sim3Solver/rotated_points", vec);
+        return false;
+    }
 
     // Step 6: Scale
 
@@ -382,6 +424,12 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
         aux_P3 = P3.array() * P3.array();
         double den = aux_P3.sum();
 
+        if(!NumericChecks::IsFinite(nom) || !NumericChecks::IsFinite(den) || den <= 1e-9)
+        {
+            logInvalidEstimate("Sim3Solver/scale", vec);
+            return false;
+        }
+
         ms12i = nom/den;
     }
     else
@@ -389,6 +437,11 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     // Step 7: Translation
     mt12i = O1 - ms12i * mR12i * O2;
+    if(!NumericChecks::IsFinite(ms12i) || !NumericChecks::IsFinite(mt12i))
+    {
+        logInvalidEstimate("Sim3Solver/translation", vec);
+        return false;
+    }
 
     // Step 8: Transformation
 
@@ -409,6 +462,14 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     Eigen::Vector3f tinv = -sRinv * mt12i;
     mT21i.block<3,1>(0,3) = tinv;
+
+    if(!NumericChecks::IsFinite(mT12i) || !NumericChecks::IsFinite(mT21i))
+    {
+        logInvalidEstimate("Sim3Solver/transform", vec);
+        return false;
+    }
+
+    return true;
 }
 
 

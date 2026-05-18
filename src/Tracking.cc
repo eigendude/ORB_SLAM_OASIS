@@ -28,9 +28,11 @@
 #include "KannalaBrandt8.h"
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
+#include "NumericChecks.h"
 
 #include <iostream>
 
+#include <cmath>
 #include <mutex>
 #include <chrono>
 
@@ -3611,6 +3613,13 @@ bool Tracking::Relocalization()
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
     // Compute Bag of Words Vector
     mCurrentFrame.ComputeBoW();
+    const auto logInvalidTrackingPose = [this](const char *stage, const auto &translation) {
+        NumericChecks::LogRejectedInvalidFrameState("tracking pose",
+                                                    stage,
+                                                    mCurrentFrame.mnId,
+                                                    mCurrentFrame.mTimeStamp,
+                                                    translation);
+    };
 
     // Relocalization is performed when tracking is lost
     // Track Lost: Query KeyFrame Database for keyframe candidates for relocalisation
@@ -3692,7 +3701,18 @@ bool Tracking::Relocalization()
             // If a Camera Pose is computed, optimize
             if(bTcw)
             {
+                if(!NumericChecks::IsFinite(eigTcw))
+                {
+                    logInvalidTrackingPose("Tracking::Relocalization/MLPnP", eigTcw.block<3,1>(0,3));
+                    continue;
+                }
+
                 Sophus::SE3f Tcw(eigTcw);
+                if(!NumericChecks::IsFiniteSE3(Tcw))
+                {
+                    logInvalidTrackingPose("Tracking::Relocalization/Sophus", Tcw.translation());
+                    continue;
+                }
                 mCurrentFrame.SetPose(Tcw);
                 // Tcw.copyTo(mCurrentFrame.mTcw);
 
