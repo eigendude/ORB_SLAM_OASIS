@@ -191,6 +191,8 @@ public:
 
     void Reset(bool bLocMap = false);
     void ResetActiveMap(bool bLocMap = false);
+    void ResetPreStableMonocularInertialInitialization(const std::string& reason,
+                                                       bool bLocMap = false);
 
     float mMeanTrack;
     bool mbInitWith3KFs;

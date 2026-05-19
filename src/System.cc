@@ -450,6 +450,16 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
             mpTracker->Reset();
             mbReset = false;
             mbResetActiveMap = false;
+            mbResetPreStableMonocularInertialInitialization = false;
+        }
+        else if(mbResetPreStableMonocularInertialInitialization)
+        {
+            cout << "SYSTEM-> Reseting pre-stable monocular-inertial initialization" << endl;
+            mpTracker->ResetPreStableMonocularInertialInitialization(
+                mPreStableMonocularInertialResetReason);
+            mPreStableMonocularInertialResetReason.clear();
+            mbResetPreStableMonocularInertialInitialization = false;
+            mbResetActiveMap = false;
         }
         else if(mbResetActiveMap)
         {
@@ -510,6 +520,14 @@ void System::ResetActiveMap()
 {
     std::unique_lock<std::mutex> lock(mMutexReset);
     mbResetActiveMap = true;
+}
+
+void System::ResetPreStableMonocularInertialInitialization(const std::string& reason)
+{
+    std::unique_lock<std::mutex> lock(mMutexReset);
+    mPreStableMonocularInertialResetReason = reason;
+    mbResetPreStableMonocularInertialInitialization = true;
+    mbResetActiveMap = false;
 }
 
 void System::Shutdown()

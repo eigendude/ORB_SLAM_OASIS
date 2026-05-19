@@ -138,6 +138,7 @@ public:
     // Reset the system (clear Atlas or the active map)
     void Reset();
     void ResetActiveMap();
+    void ResetPreStableMonocularInertialInitialization(const std::string& reason);
 
     // All threads will be requested to finish.
     // It waits until all threads have finished.
@@ -253,6 +254,8 @@ private:
     std::mutex mMutexReset;
     bool mbReset;
     bool mbResetActiveMap;
+    bool mbResetPreStableMonocularInertialInitialization = false;
+    std::string mPreStableMonocularInertialResetReason;
 
     // Change mode flags
     std::mutex mMutexMode;

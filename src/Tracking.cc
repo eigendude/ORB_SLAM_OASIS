@@ -4032,6 +4032,100 @@ void Tracking::ResetActiveMap(bool bLocMap)
     Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
 }
 
+void Tracking::ResetPreStableMonocularInertialInitialization(const std::string& reason,
+                                                            bool bLocMap)
+{
+    Verbose::PrintMess("Pre-stable monocular-inertial init reseting",
+                       Verbose::VERBOSITY_NORMAL);
+    if(mpViewer)
+    {
+        mpViewer->RequestStop();
+        while(!mpViewer->isStopped())
+            usleep(3000);
+    }
+
+    Map* pMap = mpAtlas->GetCurrentMap();
+
+    if (!bLocMap)
+    {
+        Verbose::PrintMess("Reseting Local Mapper...", Verbose::VERBOSITY_VERY_VERBOSE);
+        mpLocalMapper->RequestResetActiveMap(pMap);
+        Verbose::PrintMess("done", Verbose::VERBOSITY_VERY_VERBOSE);
+    }
+
+    Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
+    mpLoopClosing->RequestResetActiveMap(pMap);
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    Verbose::PrintMess("Reseting Database", Verbose::VERBOSITY_NORMAL);
+    mpKeyFrameDB->clearMap(pMap);
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    const unsigned int previousFirstFrameId = mnFirstFrameId;
+    const unsigned int previousInitialFrameId = mnInitialFrameId;
+    const unsigned int previousCurrentFrameId = mCurrentFrame.mnId;
+
+    mpAtlas->clearMap();
+
+    const unsigned int retryFirstFrameId = Frame::nNextId;
+    mnLastInitFrameId = retryFirstFrameId;
+    mnFirstFrameId = retryFirstFrameId;
+    mnInitialFrameId = retryFirstFrameId;
+    mnLastRelocFrameId = retryFirstFrameId;
+    mnLastKeyFrameId = 0;
+    mnFirstImuFrameId = 0;
+
+    mState = NO_IMAGES_YET;
+    mbReadyToInitializate = false;
+    mbSetInit = false;
+    mbCreatedMap = false;
+    mbVelocity = false;
+    mbVO = false;
+    mbMapUpdated = false;
+
+    mCurrentFrame = Frame();
+    mLastFrame = Frame();
+    mInitialFrame = Frame();
+    mpReferenceKF = static_cast<KeyFrame*>(NULL);
+    mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+    mvpLocalKeyFrames.clear();
+    mvpLocalMapPoints.clear();
+    mlpTemporalPoints.clear();
+    mvIniMatches.clear();
+    mvbPrevMatched.clear();
+    mvImuFromLastFrame.clear();
+
+    {
+        std::unique_lock<std::mutex> lock(mMutexImuQueue);
+        mlQueueImuData.clear();
+    }
+
+    if(mpLocalMapper)
+        mpLocalMapper->mbBadImu = false;
+
+    mLastBias = IMU::Bias();
+    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO ||
+        mSensor == System::IMU_RGBD) && mpImuPreintegratedFromLastKF)
+    {
+        delete mpImuPreintegratedFromLastKF;
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(), *mpImuCalib);
+    }
+
+    ClearTrackingFailure();
+
+    cout << "ORB pre-init reset: first_frame=" << previousFirstFrameId
+         << " initial_frame=" << previousInitialFrameId
+         << " current_frame=" << previousCurrentFrameId
+         << " retry_first_frame=" << retryFirstFrameId
+         << " reason=" << reason << endl;
+
+    if(mpViewer)
+        mpViewer->Release();
+
+    Verbose::PrintMess("   End pre-stable monocular-inertial init reseting! ",
+                       Verbose::VERBOSITY_NORMAL);
+}
+
 vector<MapPoint*> Tracking::GetLocalMapMPS()
 {
     return mvpLocalMapPoints;
