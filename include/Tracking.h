@@ -44,6 +44,30 @@
 namespace ORB_SLAM3
 {
 
+enum class TrackingFailureReason
+{
+    // No frame-level mono-inertial failure has been recorded
+    None,
+
+    // Reference keyframe BoW matching found fewer than 15 matches
+    ReferenceKeyframeTooFewMatches,
+
+    // Pose estimation succeeded, but local-map tracking failed
+    LocalMapTrackingFailed,
+
+    // Tracking was lost before the IMU map was fully initialized
+    RecentlyInitializedImuTrackingLost,
+
+    // Inertial initialization did not accumulate enough camera motion
+    NotEnoughMotionForImuInitialization,
+
+    // Local mapping marked the active IMU map as bad
+    BadImu,
+
+    // A timestamp gap forced reset before IMU initialization
+    TimestampJumpBeforeImuInitialization
+};
+
 class Viewer;
 class FrameDrawer;
 class Atlas;
@@ -100,6 +124,11 @@ public:
     void NewDataset();
     int GetNumberDataset();
     int GetMatchesInliers();
+    void RecordTrackingFailure(TrackingFailureReason reason, double timestamp);
+    void ClearTrackingFailure();
+    TrackingFailureReason GetLastTrackingFailureReason() const;
+    double GetLastTrackingFailureTimestamp() const;
+    const char* GetLastTrackingFailureReasonName() const;
 
     //DEBUG
     void SaveSubTrajectory(std::string strNameFile_frames, std::string strNameFile_kf, std::string strFolder="");
@@ -355,6 +384,12 @@ protected:
     Sophus::SE3f mTlr;
 
     void newParameterLoader(Settings* settings);
+
+    // Guards diagnostics written by tracking and local mapping threads
+    mutable std::mutex mMutexTrackingFailure;
+    TrackingFailureReason mLastTrackingFailureReason =
+        TrackingFailureReason::None;
+    double mLastTrackingFailureTimestamp = -1.0;
 
 #ifdef REGISTER_LOOP
     bool Stop();

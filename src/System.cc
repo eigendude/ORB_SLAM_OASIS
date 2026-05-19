@@ -1358,6 +1358,30 @@ bool System::HasBadImu() const
     return mpLocalMapper->mbBadImu;
 }
 
+TrackingFailureReason System::GetLastTrackingFailureReason() const
+{
+    if(mpTracker==NULL)
+        return TrackingFailureReason::None;
+
+    return mpTracker->GetLastTrackingFailureReason();
+}
+
+double System::GetLastTrackingFailureTimestamp() const
+{
+    if(mpTracker==NULL)
+        return -1.0;
+
+    return mpTracker->GetLastTrackingFailureTimestamp();
+}
+
+const char* System::GetLastTrackingFailureReasonName() const
+{
+    if(mpTracker==NULL)
+        return "none";
+
+    return mpTracker->GetLastTrackingFailureReasonName();
+}
+
 double System::GetTimeFromIMUInit()
 {
     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;

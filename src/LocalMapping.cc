@@ -138,6 +138,12 @@ void LocalMapping::Run()
                             if((mTinit<10.f) && (dist<0.02))
                             {
                                 cout << "Not enough motion for initializing. Reseting..." << endl;
+                                if(mpTracker)
+                                {
+                                    mpTracker->RecordTrackingFailure(
+                                        TrackingFailureReason::NotEnoughMotionForImuInitialization,
+                                        mpCurrentKeyFrame->mTimeStamp);
+                                }
                                 std::unique_lock<std::mutex> lock(mMutexReset);
                                 mbResetRequestedActiveMap = true;
                                 mpMapToReset = mpCurrentKeyFrame->GetMap();

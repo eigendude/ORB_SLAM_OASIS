@@ -42,6 +42,32 @@ using namespace std;
 namespace ORB_SLAM3
 {
 
+namespace
+{
+const char* TrackingFailureReasonName(TrackingFailureReason reason)
+{
+    switch(reason)
+    {
+        case TrackingFailureReason::None:
+            return "none";
+        case TrackingFailureReason::ReferenceKeyframeTooFewMatches:
+            return "ref_kf";
+        case TrackingFailureReason::LocalMapTrackingFailed:
+            return "local_map";
+        case TrackingFailureReason::RecentlyInitializedImuTrackingLost:
+            return "recently_initialized_imu_tracking_lost";
+        case TrackingFailureReason::NotEnoughMotionForImuInitialization:
+            return "not_enough_motion";
+        case TrackingFailureReason::BadImu:
+            return "bad_imu";
+        case TrackingFailureReason::TimestampJumpBeforeImuInitialization:
+            return "timestamp_jump_before_init";
+    }
+
+    return "unknown";
+}
+} // namespace
+
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
@@ -130,6 +156,35 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     vdNewKF_ms.clear();
     vdTrackTotal_ms.clear();
 #endif
+}
+
+void Tracking::RecordTrackingFailure(TrackingFailureReason reason, double timestamp)
+{
+    std::lock_guard<std::mutex> lock(mMutexTrackingFailure);
+    mLastTrackingFailureReason = reason;
+    mLastTrackingFailureTimestamp = timestamp;
+}
+
+void Tracking::ClearTrackingFailure()
+{
+    RecordTrackingFailure(TrackingFailureReason::None, -1.0);
+}
+
+TrackingFailureReason Tracking::GetLastTrackingFailureReason() const
+{
+    std::lock_guard<std::mutex> lock(mMutexTrackingFailure);
+    return mLastTrackingFailureReason;
+}
+
+double Tracking::GetLastTrackingFailureTimestamp() const
+{
+    std::lock_guard<std::mutex> lock(mMutexTrackingFailure);
+    return mLastTrackingFailureTimestamp;
+}
+
+const char* Tracking::GetLastTrackingFailureReasonName() const
+{
+    return TrackingFailureReasonName(GetLastTrackingFailureReason());
 }
 
 #ifdef REGISTER_TIMES
@@ -1807,6 +1862,11 @@ void Tracking::Track()
     if(mpLocalMapper->mbBadImu)
     {
         cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
+        if(GetLastTrackingFailureReason() == TrackingFailureReason::None)
+        {
+            RecordTrackingFailure(TrackingFailureReason::BadImu,
+                                  mCurrentFrame.mTimeStamp);
+        }
         mpSystem->ResetActiveMap();
         return;
     }
@@ -1849,6 +1909,9 @@ void Tracking::Track()
                 else
                 {
                     cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
+                    RecordTrackingFailure(
+                        TrackingFailureReason::TimestampJumpBeforeImuInitialization,
+                        mCurrentFrame.mTimeStamp);
                     mpSystem->ResetActiveMap();
                 }
                 return;
@@ -1916,6 +1979,8 @@ void Tracking::Track()
             mLastFrame = Frame(mCurrentFrame);
             return;
         }
+
+        ClearTrackingFailure();
 
         if(mpAtlas->GetAllMaps().size() == 1)
         {
@@ -2124,13 +2189,23 @@ void Tracking::Track()
         // If we have an initial estimation of the camera pose and matching. Track the local map.
         if(!mbOnlyTracking)
         {
+            bool bAttemptedLocalMap = false;
             if(bOK)
             {
+                bAttemptedLocalMap = true;
                 bOK = TrackLocalMap();
 
             }
             if(!bOK)
+            {
+                if(bAttemptedLocalMap)
+                {
+                    RecordTrackingFailure(
+                        TrackingFailureReason::LocalMapTrackingFailed,
+                        mCurrentFrame.mTimeStamp);
+                }
                 cout << "Fail to track local map!" << endl;
+            }
         }
         else
         {
@@ -2142,7 +2217,10 @@ void Tracking::Track()
         }
 
         if(bOK)
+        {
+            ClearTrackingFailure();
             mState = OK;
+        }
         else if (mState == OK)
         {
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
@@ -2151,6 +2229,9 @@ void Tracking::Track()
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    RecordTrackingFailure(
+                        TrackingFailureReason::RecentlyInitializedImuTrackingLost,
+                        mCurrentFrame.mTimeStamp);
                     mpSystem->ResetActiveMap();
                 }
 
@@ -2734,6 +2815,9 @@ bool Tracking::TrackReferenceKeyFrame()
     if(nmatches<15)
     {
         cout << "TRACK_REF_KF: Less than 15 matches!!\n";
+        RecordTrackingFailure(
+            TrackingFailureReason::ReferenceKeyframeTooFewMatches,
+            mCurrentFrame.mTimeStamp);
         return false;
     }
 

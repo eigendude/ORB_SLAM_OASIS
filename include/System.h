@@ -28,6 +28,11 @@
 #include<thread>
 #include<opencv2/opencv.hpp>
 
+namespace ORB_SLAM3
+{
+enum class TrackingFailureReason;
+}
+
 #include "Tracking.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
@@ -181,6 +186,9 @@ public:
     bool IsImuInitialized() const;
     // Returns true when local mapping has marked the active IMU map as bad.
     bool HasBadImu() const;
+    TrackingFailureReason GetLastTrackingFailureReason() const;
+    double GetLastTrackingFailureTimestamp() const;
+    const char* GetLastTrackingFailureReasonName() const;
 
     // For debugging
     double GetTimeFromIMUInit();
