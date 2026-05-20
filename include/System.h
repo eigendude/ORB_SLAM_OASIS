@@ -39,6 +39,8 @@ struct InertialStateDiagnostic
 {
   bool visual_only_after_init = false;
   bool imu_initialized = false;
+  bool inertial_init_provisional = false;
+  bool inertial_init_committed = false;
   bool valid_pose = false;
   bool valid_last_pose = false;
   bool valid_visual_prediction = false;
@@ -54,6 +56,7 @@ struct InertialStateDiagnostic
   double scale = 1.0;
   double last_alignment_rotation_deg = 0.0;
   double last_alignment_scale = 1.0;
+  unsigned long inertial_init_attempt_id = 0;
   std::string last_alignment_event;
   Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
   Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
@@ -219,6 +222,8 @@ public:
     Atlas* GetAtlas() { return mpAtlas; }
     // Returns true when the active inertial map has accepted IMU initialization.
     bool IsImuInitialized() const;
+    bool IsInertialInitializationProvisional() const;
+    bool IsInertialInitializationCommitted() const;
     // Returns true when local mapping has marked the active IMU map as bad.
     bool HasBadImu() const;
     TrackingFailureReason GetLastTrackingFailureReason() const;

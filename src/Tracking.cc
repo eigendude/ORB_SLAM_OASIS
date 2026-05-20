@@ -225,6 +225,9 @@ InertialStateDiagnostic Tracking::GetInertialStateDiagnostic() const
   if (mpLocalMapper)
   {
     diagnostic.scale = mpLocalMapper->mScale;
+    diagnostic.inertial_init_provisional = mpLocalMapper->IsInertialInitializationProvisional();
+    diagnostic.inertial_init_committed = mpLocalMapper->IsInertialInitializationCommitted();
+    diagnostic.inertial_init_attempt_id = mpLocalMapper->mInertialInitAttemptId;
     diagnostic.gravity_world = mpLocalMapper->mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
     diagnostic.last_alignment_event = mpLocalMapper->mLastAlignmentEvent;
     diagnostic.last_alignment_rotation_deg = mpLocalMapper->mLastAlignmentRotationDeg;

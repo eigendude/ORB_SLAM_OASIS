@@ -505,6 +505,8 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mLastViba1Time = -1.0;
     mLastViba1KfId = 0;
     mInitialImuKeyframeId = 0;
+    mInertialInitAttemptId = 0;
+    mLastInitLifecycleCommitted = false;
     mLastAlignmentEvent = "none";
     mLastAlignmentRotationDeg = 0.0;
     mLastAlignmentScale = 1.0;
@@ -519,6 +521,30 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     nLBA_abort = 0;
 #endif
 
+}
+
+bool LocalMapping::IsInertialInitializationProvisional() const
+{
+  if (!mbInertial || !mbMonocular || mbBadImu || mpAtlas == nullptr)
+    return false;
+
+  Map* pMap = mpAtlas->GetCurrentMap();
+  if (pMap == nullptr || !pMap->isImuInitialized())
+    return false;
+
+  return !pMap->GetIniertialBA2() && mTinit < 10.0f;
+}
+
+bool LocalMapping::IsInertialInitializationCommitted() const
+{
+  if (!mbInertial || mpAtlas == nullptr)
+    return false;
+
+  Map* pMap = mpAtlas->GetCurrentMap();
+  if (pMap == nullptr || !pMap->isImuInitialized() || mbBadImu)
+    return false;
+
+  return !IsInertialInitializationProvisional();
 }
 
 void LocalMapping::SetLoopCloser(LoopClosing* pLoopCloser)
@@ -603,27 +629,51 @@ void LocalMapping::Run()
 
                         if(dist>0.05)
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
+                        const bool motion_check_not_enough =
+                            !mpCurrentKeyFrame->GetMap()->GetIniertialBA2() && (mTinit < 10.f) &&
+                            (dist < 0.02);
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
-                            if((mTinit<10.f) && (dist<0.02))
+                          if (motion_check_not_enough)
+                          {
+                            std::cout << "MI init_rejected:" << " reason=not_enough_motion"
+                                      << " mTinit=" << mTinit << " dist=" << dist
+                                      << " kfs=" << mpAtlas->KeyFramesInMap()
+                                      << " map=" << mpAtlas->MapPointsInMap()
+                                      << " inl=" << mpTracker->GetMatchesInliers() << std::endl;
+                            std::cout
+                                << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                                << " phase=motion_check after_align=1 map_imu="
+                                << (mpCurrentKeyFrame->GetMap()->isImuInitialized() ? 1 : 0)
+                                << " tracking_state=" << mpTracker->mState
+                                << " bad_imu=1 motion=not_enough should_publish=0 committed=0"
+                                << " reset=1 mTinit=" << mTinit << " dist=" << dist
+                                << " kfs=" << mpAtlas->KeyFramesInMap()
+                                << " map=" << mpAtlas->MapPointsInMap() << std::endl;
+                            cout << "Not enough motion for initializing. Reseting..." << endl;
+                            if (mpTracker)
                             {
-                              std::cout << "MI init_rejected:" << " reason=not_enough_motion"
-                                        << " mTinit=" << mTinit << " dist=" << dist
-                                        << " kfs=" << mpAtlas->KeyFramesInMap()
-                                        << " map=" << mpAtlas->MapPointsInMap()
-                                        << " inl=" << mpTracker->GetMatchesInliers() << std::endl;
-                              cout << "Not enough motion for initializing. Reseting..." << endl;
-                              if (mpTracker)
-                              {
-                                mpTracker->RecordTrackingFailure(
-                                    TrackingFailureReason::NotEnoughMotionForImuInitialization,
-                                    mpCurrentKeyFrame->mTimeStamp);
-                              }
-                                std::unique_lock<std::mutex> lock(mMutexReset);
-                                mbResetRequestedActiveMap = true;
-                                mpMapToReset = mpCurrentKeyFrame->GetMap();
-                                mbBadImu = true;
+                              mpTracker->RecordTrackingFailure(
+                                  TrackingFailureReason::NotEnoughMotionForImuInitialization,
+                                  mpCurrentKeyFrame->mTimeStamp);
                             }
+                            std::unique_lock<std::mutex> lock(mMutexReset);
+                            mbResetRequestedActiveMap = true;
+                            mpMapToReset = mpCurrentKeyFrame->GetMap();
+                            mbBadImu = true;
+                          }
+                        }
+                        if (!motion_check_not_enough && IsInertialInitializationCommitted() &&
+                            !mLastInitLifecycleCommitted)
+                        {
+                          mLastInitLifecycleCommitted = true;
+                          std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                                    << " phase=motion_check after_align=1 map_imu=1"
+                                    << " tracking_state=" << mpTracker->mState
+                                    << " bad_imu=0 motion=ok should_publish=1 committed=1 reset=0"
+                                    << " mTinit=" << mTinit << " dist=" << dist
+                                    << " kfs=" << mpAtlas->KeyFramesInMap()
+                                    << " map=" << mpAtlas->MapPointsInMap() << std::endl;
                         }
 
                         bool bLarge = ((mpTracker->GetMatchesInliers()>75)&&mbMonocular)||((mpTracker->GetMatchesInliers()>100)&&!mbMonocular);
@@ -773,6 +823,7 @@ void LocalMapping::Run()
             vdLMTotal_ms.push_back(timeLocalMap);
 #endif
         }
+
         else if(Stop() && !mbBadImu)
         {
             // Safe area to stop
@@ -1633,6 +1684,7 @@ void LocalMapping::ResetIfRequested()
             mbNotBA2 = true;
             mbNotBA1 = true;
             mbBadImu=false;
+            mLastInitLifecycleCommitted = false;
 
             mIdxInit=0;
 
@@ -1650,6 +1702,7 @@ void LocalMapping::ResetIfRequested()
             mbNotBA2 = true;
             mbNotBA1 = true;
             mbBadImu=false;
+            mLastInitLifecycleCommitted = false;
 
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
@@ -1731,6 +1784,11 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     const bool map_was_imu_initialized = mpAtlas->isImuInitialized();
     const std::string alignment_event =
         !map_was_imu_initialized ? "init_accepted" : (priorA != 0.f ? "viba_1" : "viba_2");
+    if (!map_was_imu_initialized)
+    {
+      ++mInertialInitAttemptId;
+      mLastInitLifecycleCommitted = false;
+    }
 
     while(CheckNewKeyFrames())
     {
@@ -1802,6 +1860,15 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
          << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap() << " dt=" << mInitTime
          << " ba=" << mba.norm() << " bg=" << mbg.norm() << " priorG=" << priorG
          << " priorA=" << priorA << " fiba=" << bFIBA << endl;
+    if (!map_was_imu_initialized)
+    {
+      std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                << " phase=before_align after_align=0 map_imu=0"
+                << " tracking_state=" << mpTracker->mState << " bad_imu=" << (mbBadImu ? 1 : 0)
+                << " motion=pending should_publish=0 committed=0 reset=0" << " mTinit=" << mTinit
+                << " kfs=" << N << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
+                << std::endl;
+    }
 
     const Eigen::Vector3d g_old_world = mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
     const Eigen::Vector3d g_new_world(0.0, 0.0, -1.0);
@@ -1826,6 +1893,18 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         const AlignmentTraceSnapshot align_after = CaptureAlignmentTraceSnapshot(
             mpTracker, mpCurrentKeyFrame, mScale, g_new_world, "g_new_world", vpKF);
         LogAlignmentTrace(alignment_event, align_before, align_after, mRwg, mScale);
+        if (!map_was_imu_initialized)
+        {
+          std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                    << " phase=after_align after_align=1 map_imu="
+                    << (mpAtlas->isImuInitialized() ? 1 : 0)
+                    << " tracking_state=" << mpTracker->mState << " bad_imu=" << (mbBadImu ? 1 : 0)
+                    << " motion=pending should_publish=0 committed=0 reset=0" << " dR="
+                    << RotationAngleRad(align_after.Tcw.rotationMatrix(),
+                                        align_before.Tcw.rotationMatrix()) *
+                           180.0 / M_PI
+                    << " s=" << mScale << std::endl;
+        }
         mLastAlignmentEvent = alignment_event;
         mLastAlignmentRotationDeg =
             RotationAngleRad(align_after.Tcw.rotationMatrix(), align_before.Tcw.rotationMatrix()) *
@@ -1849,6 +1928,11 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         mpTracker->t0IMU = mpTracker->mCurrentFrame.mTimeStamp;
         mpCurrentKeyFrame->bImu = true;
         mInitialImuKeyframeId = mpCurrentKeyFrame->mnId;
+        std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                  << " phase=set_imu_initialized after_align=1 map_imu=1"
+                  << " tracking_state=" << mpTracker->mState << " bad_imu=" << (mbBadImu ? 1 : 0)
+                  << " motion=pending should_publish=0 committed=0 reset=0" << " mTinit=" << mTinit
+                  << " keyframe=" << mpCurrentKeyFrame->mnId << std::endl;
     }
 
     std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();

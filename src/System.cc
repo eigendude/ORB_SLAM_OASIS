@@ -1365,6 +1365,28 @@ bool System::IsImuInitialized() const
     return mpAtlas->isImuInitialized();
 }
 
+bool System::IsInertialInitializationProvisional() const
+{
+  if (mSensor != IMU_MONOCULAR && mSensor != IMU_STEREO && mSensor != IMU_RGBD)
+    return false;
+
+  if (mpLocalMapper == NULL)
+    return false;
+
+  return mpLocalMapper->IsInertialInitializationProvisional();
+}
+
+bool System::IsInertialInitializationCommitted() const
+{
+  if (mSensor != IMU_MONOCULAR && mSensor != IMU_STEREO && mSensor != IMU_RGBD)
+    return false;
+
+  if (mpLocalMapper == NULL)
+    return false;
+
+  return mpLocalMapper->IsInertialInitializationCommitted();
+}
+
 bool System::HasBadImu() const
 {
     if(mSensor!=IMU_MONOCULAR && mSensor!=IMU_STEREO && mSensor!=IMU_RGBD)

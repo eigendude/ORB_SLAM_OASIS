@@ -107,9 +107,13 @@ public:
     double mLastViba1Time;
     unsigned long mLastViba1KfId;
     unsigned long mInitialImuKeyframeId;
+    unsigned long mInertialInitAttemptId;
+    bool mLastInitLifecycleCommitted;
     std::string mLastAlignmentEvent;
     double mLastAlignmentRotationDeg;
     double mLastAlignmentScale;
+    bool IsInertialInitializationProvisional() const;
+    bool IsInertialInitializationCommitted() const;
 
     bool mbWriteStats;
 
