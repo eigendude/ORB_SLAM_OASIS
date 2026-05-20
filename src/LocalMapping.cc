@@ -73,9 +73,15 @@ struct AlignmentTraceSnapshot
   unsigned long first_kf_id = 0;
   unsigned long last_kf_id = 0;
   double scale = 1.0;
+  std::string gravity_world_frame = "unknown";
   Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
   Eigen::Vector3d gravity_camera = Eigen::Vector3d::Zero();
   Eigen::Vector3d gravity_body = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gravity_body_tcb_candidate = Eigen::Vector3d::Zero();
+  Eigen::Vector3d specific_force_camera = Eigen::Vector3d::Zero();
+  Eigen::Vector3d specific_force_body = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d Rbc = Eigen::Matrix3d::Identity();
+  Eigen::Matrix3d Rcb = Eigen::Matrix3d::Identity();
   Sophus::SE3f Tcw;
   Sophus::SE3f ref_Twc;
   Sophus::SE3f first_Twc;
@@ -115,6 +121,33 @@ std::string FormatMapPointSample(const std::vector<Eigen::Vector3f>& points, siz
     return "na";
 
   return FormatVector3Compact(points[index]);
+}
+
+const char* SignedAxisName(const Eigen::Vector3d& v)
+{
+  int axis = 0;
+  double magnitude = std::abs(v.x());
+  if (std::abs(v.y()) > magnitude)
+  {
+    axis = 1;
+    magnitude = std::abs(v.y());
+  }
+  if (std::abs(v.z()) > magnitude)
+    axis = 2;
+
+  if (axis == 0)
+    return v.x() >= 0.0 ? "+X" : "-X";
+  if (axis == 1)
+    return v.y() >= 0.0 ? "+Y" : "-Y";
+  return v.z() >= 0.0 ? "+Z" : "-Z";
+}
+
+double UnitDot(const Eigen::Vector3d& a, const Eigen::Vector3d& b)
+{
+  if (a.norm() < 1e-9 || b.norm() < 1e-9)
+    return 0.0;
+
+  return a.normalized().dot(b.normalized());
 }
 
 double RotationAngleRad(const Eigen::Matrix3f& Rcw1, const Eigen::Matrix3f& Rcw2)
@@ -186,7 +219,8 @@ AlignmentReprojectionStats ComputeAlignmentReprojectionStats(Frame& frame)
 AlignmentTraceSnapshot CaptureAlignmentTraceSnapshot(Tracking* tracker,
                                                      KeyFrame* current_keyframe,
                                                      double scale,
-                                                     const Eigen::Matrix3d& Rwg,
+                                                     const Eigen::Vector3d& gravity_world,
+                                                     const std::string& gravity_world_frame,
                                                      const std::vector<KeyFrame*>& keyframes)
 {
   AlignmentTraceSnapshot snapshot;
@@ -199,11 +233,16 @@ AlignmentTraceSnapshot CaptureAlignmentTraceSnapshot(Tracking* tracker,
   snapshot.keyframe_id = current_keyframe->mnId;
   snapshot.map_id = map ? map->GetId() : 0;
   snapshot.scale = scale;
-  snapshot.gravity_world = Rwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+  snapshot.gravity_world = gravity_world;
+  snapshot.gravity_world_frame = gravity_world_frame;
   snapshot.Tcw = tracker->mCurrentFrame.GetPose();
   snapshot.gravity_camera = snapshot.Tcw.rotationMatrix().cast<double>() * snapshot.gravity_world;
-  snapshot.gravity_body = tracker->mCurrentFrame.mImuCalib.mTbc.rotationMatrix().cast<double>() *
-                          snapshot.gravity_camera;
+  snapshot.Rbc = tracker->mCurrentFrame.mImuCalib.mTbc.rotationMatrix().cast<double>();
+  snapshot.Rcb = tracker->mCurrentFrame.mImuCalib.mTcb.rotationMatrix().cast<double>();
+  snapshot.gravity_body = snapshot.Rbc * snapshot.gravity_camera;
+  snapshot.gravity_body_tcb_candidate = snapshot.Rcb * snapshot.gravity_camera;
+  snapshot.specific_force_camera = -snapshot.gravity_camera;
+  snapshot.specific_force_body = -snapshot.gravity_body;
   snapshot.reprojection = ComputeAlignmentReprojectionStats(tracker->mCurrentFrame);
 
   KeyFrame* ref_keyframe = tracker->mCurrentFrame.mpReferenceKF
@@ -233,7 +272,9 @@ AlignmentTraceSnapshot CaptureAlignmentTraceSnapshot(Tracking* tracker,
 
 void LogAlignmentTrace(const std::string& event_name,
                        const AlignmentTraceSnapshot& before,
-                       const AlignmentTraceSnapshot& after)
+                       const AlignmentTraceSnapshot& after,
+                       const Eigen::Matrix3d& Rwg,
+                       const float scale)
 {
   if (!before.valid || !after.valid)
     return;
@@ -247,17 +288,72 @@ void LogAlignmentTrace(const std::string& event_name,
   const double dTwcDeg =
       RotationAngleRad(afterTwc.rotationMatrix(), beforeTwc.rotationMatrix()) * 180.0 / M_PI;
   const double dscale = after.scale - before.scale;
+  const Eigen::Matrix3f Rwg_f = Rwg.cast<float>();
+  const Eigen::Matrix3f Rgw_f = Rwg.transpose().cast<float>();
+  const Eigen::Vector3d g_old_world = Rwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+  const Eigen::Vector3d wrong_epoch_gravity_camera =
+      after.Tcw.rotationMatrix().cast<double>() * g_old_world;
+  const Eigen::Vector3d wrong_epoch_gravity_body = after.Rbc * wrong_epoch_gravity_camera;
+  const bool body_ok = UnitDot(after.gravity_body, -Eigen::Vector3d::UnitZ()) > 0.9;
+  const bool camera_ok = UnitDot(after.gravity_camera, Eigen::Vector3d::UnitY()) > 0.9;
+
+  std::cout << "MI align_formula:" << " function=LocalMapping::InitializeIMU"
+            << " event=" << event_name << " input_gravity=g_old_world=mRwg*(0,0,-1)_gravity_accel"
+            << " input_frame=pre_alignment_visual_world"
+            << " target_gravity=g_new_world=(0,0,-1)_gravity_accel"
+            << " target_frame=post_alignment_gravity_world"
+            << " Rwg_rpy=" << FormatRpyDegCompact(Rwg_f)
+            << " Rgw_rpy=" << FormatRpyDegCompact(Rgw_f)
+            << " Rwg_angle=" << RotationAngleRad(Rwg_f, Eigen::Matrix3f::Identity()) * 180.0 / M_PI
+            << " applied=Twg=Rwg^T,ApplyScaledRotation(Twg,s,true)"
+            << " Tbc_applied_for_body_check=1 Tcb_applied=0"
+            << " vector_semantics=gravity_accel_not_specific_force s=" << scale << std::endl;
 
   std::cout << "MI align_candidate:" << " event=" << event_name << " s_before=" << before.scale
             << " s_after=" << after.scale << " dscale=" << dscale
             << " dR_rpy=" << FormatRpyDegCompact(dRcw) << " dR_angle=" << dRdeg
-            << " dt=" << FormatVector3Compact(dTwc)
-            << " gravity_before_world=" << FormatVector3Compact(before.gravity_world)
-            << " gravity_after_world=" << FormatVector3Compact(after.gravity_world)
+            << " dt=" << FormatVector3Compact(dTwc) << " gravity_before_"
+            << before.gravity_world_frame << "=" << FormatVector3Compact(before.gravity_world)
+            << " gravity_after_" << after.gravity_world_frame << "="
+            << FormatVector3Compact(after.gravity_world)
             << " gravity_before_camera=" << FormatVector3Compact(before.gravity_camera)
             << " gravity_after_camera=" << FormatVector3Compact(after.gravity_camera)
             << " gravity_before_body=" << FormatVector3Compact(before.gravity_body)
             << " gravity_after_body=" << FormatVector3Compact(after.gravity_body) << std::endl;
+
+  std::cout << "MI align_invariant:" << " event=" << event_name
+            << " gravity_camera_axis=" << SignedAxisName(after.gravity_camera)
+            << " gravity_body_axis=" << SignedAxisName(after.gravity_body)
+            << " specific_force_camera_axis=" << SignedAxisName(after.specific_force_camera)
+            << " specific_force_body_axis=" << SignedAxisName(after.specific_force_body)
+            << " gravity_camera_dot_y=" << UnitDot(after.gravity_camera, Eigen::Vector3d::UnitY())
+            << " gravity_body_dot_neg_z=" << UnitDot(after.gravity_body, -Eigen::Vector3d::UnitZ())
+            << " specific_force_camera_dot_neg_y="
+            << UnitDot(after.specific_force_camera, -Eigen::Vector3d::UnitY())
+            << " specific_force_body_dot_z="
+            << UnitDot(after.specific_force_body, Eigen::Vector3d::UnitZ())
+            << " ok=" << (body_ok ? 1 : 0) << std::endl;
+  if (!body_ok)
+  {
+    std::cout << "MI align_invariant_warn:" << " event=" << event_name
+              << " gravity_body_axis=" << SignedAxisName(after.gravity_body)
+              << " expected=-Z possible_epoch_or_transform_mismatch=1"
+              << " gravity_body=" << FormatVector3Compact(after.gravity_body)
+              << " gravity_camera=" << FormatVector3Compact(after.gravity_camera)
+              << " camera_ok=" << (camera_ok ? 1 : 0) << std::endl;
+  }
+
+  std::cout << "MI align_candidates:" << " event=" << event_name
+            << " current_g_body_Tbc=" << FormatVector3Compact(after.gravity_body) << "/"
+            << SignedAxisName(after.gravity_body)
+            << " old_epoch_g_body_Tbc=" << FormatVector3Compact(wrong_epoch_gravity_body) << "/"
+            << SignedAxisName(wrong_epoch_gravity_body) << " current_g_body_Tcb_wrong="
+            << FormatVector3Compact(after.gravity_body_tcb_candidate) << "/"
+            << SignedAxisName(after.gravity_body_tcb_candidate)
+            << " specific_force_as_gravity_body_wrong="
+            << FormatVector3Compact(after.specific_force_body) << "/"
+            << SignedAxisName(after.specific_force_body)
+            << " Rwg_maps_new_minus_z_to_old_g=1 Rgw_applied_to_map=1" << std::endl;
 
   std::cout << "MI align_pose:" << " event=" << event_name
             << " Tcw_before_rpy=" << FormatRpyDegCompact(before.Tcw.rotationMatrix())
@@ -1707,8 +1803,15 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
          << " ba=" << mba.norm() << " bg=" << mbg.norm() << " priorG=" << priorG
          << " priorA=" << priorA << " fiba=" << bFIBA << endl;
 
+    const Eigen::Vector3d g_old_world = mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+    const Eigen::Vector3d g_new_world(0.0, 0.0, -1.0);
+    const Eigen::Vector3d align_before_gravity =
+        map_was_imu_initialized ? g_new_world : g_old_world;
+    const std::string align_before_gravity_frame =
+        map_was_imu_initialized ? "g_new_world" : "g_old_world";
     const AlignmentTraceSnapshot align_before =
-        CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
+        CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, align_before_gravity,
+                                      align_before_gravity_frame, vpKF);
     AlignmentTraceSnapshot full_ba_before;
 
     // Before this line we are not changing the map
@@ -1720,9 +1823,9 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
         }
 
-        const AlignmentTraceSnapshot align_after =
-            CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
-        LogAlignmentTrace(alignment_event, align_before, align_after);
+        const AlignmentTraceSnapshot align_after = CaptureAlignmentTraceSnapshot(
+            mpTracker, mpCurrentKeyFrame, mScale, g_new_world, "g_new_world", vpKF);
+        LogAlignmentTrace(alignment_event, align_before, align_after, mRwg, mScale);
         mLastAlignmentEvent = alignment_event;
         mLastAlignmentRotationDeg =
             RotationAngleRad(align_after.Tcw.rotationMatrix(), align_before.Tcw.rotationMatrix()) *
@@ -1869,9 +1972,9 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     mpTracker->mState=Tracking::OK;
     if (bFIBA)
     {
-      const AlignmentTraceSnapshot full_ba_after =
-          CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
-      LogAlignmentTrace("full_inertial_ba", full_ba_before, full_ba_after);
+      const AlignmentTraceSnapshot full_ba_after = CaptureAlignmentTraceSnapshot(
+          mpTracker, mpCurrentKeyFrame, mScale, g_new_world, "g_new_world", vpKF);
+      LogAlignmentTrace("full_inertial_ba", full_ba_before, full_ba_after, mRwg, mScale);
       mLastAlignmentEvent = "full_inertial_ba";
       mLastAlignmentRotationDeg = RotationAngleRad(full_ba_after.Tcw.rotationMatrix(),
                                                    full_ba_before.Tcw.rotationMatrix()) *
