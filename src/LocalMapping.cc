@@ -1777,10 +1777,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         return;
 
     mFirstTs=vpKF.front()->mTimeStamp;
-    if(mpCurrentKeyFrame->mTimeStamp-mFirstTs<minTime)
-        return;
+    const double candidateTinit = mpCurrentKeyFrame->mTimeStamp - mFirstTs;
+    if (candidateTinit < minTime)
+      return;
 
-    bInitializing = true;
     const bool map_was_imu_initialized = mpAtlas->isImuInitialized();
     const std::string alignment_event =
         !map_was_imu_initialized ? "init_accepted" : (priorA != 0.f ? "viba_1" : "viba_2");
@@ -1789,6 +1789,46 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
       ++mInertialInitAttemptId;
       mLastInitLifecycleCommitted = false;
     }
+
+    float recent_translation = -1.0f;
+    if (!map_was_imu_initialized && mpCurrentKeyFrame->mPrevKF &&
+        mpCurrentKeyFrame->mPrevKF->mPrevKF)
+    {
+      recent_translation =
+          (mpCurrentKeyFrame->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->GetCameraCenter())
+              .norm() +
+          (mpCurrentKeyFrame->mPrevKF->mPrevKF->GetCameraCenter() -
+           mpCurrentKeyFrame->mPrevKF->GetCameraCenter())
+              .norm();
+    }
+
+    if (!map_was_imu_initialized)
+    {
+      const bool not_enough_motion =
+          candidateTinit < 10.0 && recent_translation >= 0.0f && recent_translation < 0.02f;
+      std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                << " phase=pre_align_motion_check mutation_started=0"
+                << " mTinit=" << candidateTinit << " recent_translation=" << recent_translation
+                << " kfs=" << vpKF.size() << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
+                << " will_align=" << (not_enough_motion ? 0 : 1)
+                << " reason=" << (not_enough_motion ? "not_enough_motion" : "ok") << std::endl;
+      if (not_enough_motion)
+      {
+        std::cout << "MI init_rejected:" << " reason=not_enough_motion"
+                  << " mTinit=" << candidateTinit << " dist=" << recent_translation
+                  << " kfs=" << vpKF.size() << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
+                  << " inl=" << mpTracker->GetMatchesInliers() << " pre_align=1" << std::endl;
+        if (mpTracker)
+        {
+          mpTracker->RecordTrackingFailure(
+              TrackingFailureReason::NotEnoughMotionForImuInitialization,
+              mpCurrentKeyFrame->mTimeStamp);
+        }
+        return;
+      }
+    }
+
+    bInitializing = true;
 
     while(CheckNewKeyFrames())
     {
