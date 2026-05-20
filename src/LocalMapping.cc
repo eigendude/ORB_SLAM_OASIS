@@ -1925,48 +1925,105 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, align_before_gravity,
                                       align_before_gravity_frame, vpKF);
     AlignmentTraceSnapshot full_ba_before;
+    const Eigen::Matrix3f Rwg_f = mRwg.cast<float>();
+    const double Rwg_angle_deg =
+        RotationAngleRad(Rwg_f, Eigen::Matrix3f::Identity()) * 180.0 / M_PI;
+    bool alignment_applied = false;
+    bool init_epoch_ok = true;
+    bool init_epoch_failed = false;
 
     // Before this line we are not changing the map
     {
-        std::unique_lock<std::mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
-        if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
-            Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
-            mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
-            mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
-        }
+      std::unique_lock<std::mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
+      if (!map_was_imu_initialized || (fabs(mScale - 1.f) > 0.00001) || !mbMonocular ||
+          Rwg_angle_deg > 0.01)
+      {
+        Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
+        mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
+        mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
+        alignment_applied = true;
+      }
 
-        const AlignmentTraceSnapshot align_after = CaptureAlignmentTraceSnapshot(
-            mpTracker, mpCurrentKeyFrame, mScale, g_new_world, "g_new_world", vpKF);
-        LogAlignmentTrace(alignment_event, align_before, align_after, mRwg, mScale);
-        if (!map_was_imu_initialized)
+      const AlignmentTraceSnapshot align_after = CaptureAlignmentTraceSnapshot(
+          mpTracker, mpCurrentKeyFrame, mScale, g_new_world, "g_new_world", vpKF);
+      LogAlignmentTrace(alignment_event, align_before, align_after, mRwg, mScale);
+      if (!map_was_imu_initialized)
+      {
+        const Eigen::Vector3d g_body_old_epoch =
+            align_after.Rbc * (align_after.Tcw.rotationMatrix().cast<double>() * g_old_world);
+        const Eigen::Vector3d g_body_new_epoch = align_after.gravity_body;
+        const bool old_ok = UnitDot(g_body_old_epoch, -Eigen::Vector3d::UnitZ()) > 0.9;
+        const bool new_ok = UnitDot(g_body_new_epoch, -Eigen::Vector3d::UnitZ()) > 0.9;
+        const bool used_new_epoch = alignment_applied;
+        init_epoch_ok = used_new_epoch ? new_ok : old_ok;
+        std::cout << "MI init_epoch_check:" << " event=" << alignment_event
+                  << " Rwg_angle=" << Rwg_angle_deg << " applied_dR="
+                  << RotationAngleRad(align_after.Tcw.rotationMatrix(),
+                                      align_before.Tcw.rotationMatrix()) *
+                         180.0 / M_PI
+                  << " s=" << mScale << " used_epoch=" << (used_new_epoch ? "new" : "old")
+                  << " g_body_old_epoch=" << FormatVector3Compact(g_body_old_epoch) << "/"
+                  << SignedAxisName(g_body_old_epoch)
+                  << " g_body_new_epoch=" << FormatVector3Compact(g_body_new_epoch) << "/"
+                  << SignedAxisName(g_body_new_epoch) << " old_ok=" << (old_ok ? 1 : 0)
+                  << " new_ok=" << (new_ok ? 1 : 0)
+                  << " will_set_imu_initialized=" << (init_epoch_ok ? 1 : 0)
+                  << " reason=" << (init_epoch_ok ? "ok" : "bad_imu_alignment_epoch") << std::endl;
+      }
+      if (!map_was_imu_initialized)
+      {
+        std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                  << " phase=after_align after_align=1 map_imu="
+                  << (mpAtlas->isImuInitialized() ? 1 : 0)
+                  << " tracking_state=" << mpTracker->mState << " bad_imu=" << (mbBadImu ? 1 : 0)
+                  << " motion=pending should_publish=0 committed=0 reset=0" << " dR="
+                  << RotationAngleRad(align_after.Tcw.rotationMatrix(),
+                                      align_before.Tcw.rotationMatrix()) *
+                         180.0 / M_PI
+                  << " s=" << mScale << std::endl;
+      }
+      mLastAlignmentEvent = alignment_event;
+      mLastAlignmentRotationDeg =
+          RotationAngleRad(align_after.Tcw.rotationMatrix(), align_before.Tcw.rotationMatrix()) *
+          180.0 / M_PI;
+      mLastAlignmentScale = mScale;
+      if (bFIBA)
+        full_ba_before = align_after;
+
+      if (!map_was_imu_initialized && !init_epoch_ok)
+      {
+        std::cout << "MI init_rejected:" << " reason=bad_imu_alignment_epoch"
+                  << " mTinit=" << mTinit << " Rwg_angle=" << Rwg_angle_deg
+                  << " applied=" << (alignment_applied ? 1 : 0) << " s=" << mScale << " kfs=" << N
+                  << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap() << std::endl;
+        init_epoch_failed = true;
+      }
+
+      // Check if initialization OK
+      if (!init_epoch_failed && !mpAtlas->isImuInitialized())
+        for (int i = 0; i < N; i++)
         {
-          std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
-                    << " phase=after_align after_align=1 map_imu="
-                    << (mpAtlas->isImuInitialized() ? 1 : 0)
-                    << " tracking_state=" << mpTracker->mState << " bad_imu=" << (mbBadImu ? 1 : 0)
-                    << " motion=pending should_publish=0 committed=0 reset=0" << " dR="
-                    << RotationAngleRad(align_after.Tcw.rotationMatrix(),
-                                        align_before.Tcw.rotationMatrix()) *
-                           180.0 / M_PI
-                    << " s=" << mScale << std::endl;
+          KeyFrame* pKF2 = vpKF[i];
+          pKF2->bImu = true;
         }
-        mLastAlignmentEvent = alignment_event;
-        mLastAlignmentRotationDeg =
-            RotationAngleRad(align_after.Tcw.rotationMatrix(), align_before.Tcw.rotationMatrix()) *
-            180.0 / M_PI;
-        mLastAlignmentScale = mScale;
-        if (bFIBA)
-          full_ba_before = align_after;
-
-        // Check if initialization OK
-        if (!mpAtlas->isImuInitialized())
-            for (int i = 0; i < N; i++) {
-                KeyFrame *pKF2 = vpKF[i];
-                pKF2->bImu = true;
-            }
     }
 
-    mpTracker->UpdateFrameIMU(1.0,vpKF[0]->GetImuBias(),mpCurrentKeyFrame);
+    if (init_epoch_failed)
+    {
+      if (mpTracker)
+      {
+        mpTracker->RecordTrackingFailure(TrackingFailureReason::BadImu,
+                                         mpCurrentKeyFrame->mTimeStamp);
+      }
+      std::unique_lock<std::mutex> reset_lock(mMutexReset);
+      mbResetRequestedActiveMap = true;
+      mpMapToReset = mpCurrentKeyFrame->GetMap();
+      mbBadImu = true;
+      bInitializing = false;
+      return;
+    }
+
+    mpTracker->UpdateFrameIMU(1.0, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
     if (!mpAtlas->isImuInitialized())
     {
         mpAtlas->SetImuInitialized();
