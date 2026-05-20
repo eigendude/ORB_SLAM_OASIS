@@ -54,12 +54,67 @@ struct InertialUpdateSnapshot
   size_t map_points = 0;
 };
 
+struct AlignmentReprojectionStats
+{
+  int projected = 0;
+  int matches = 0;
+  int inliers = 0;
+  double median_error = -1.0;
+  double max_error = -1.0;
+};
+
+struct AlignmentTraceSnapshot
+{
+  bool valid = false;
+  unsigned long frame_id = 0;
+  unsigned long keyframe_id = 0;
+  unsigned long map_id = 0;
+  unsigned long ref_kf_id = 0;
+  unsigned long first_kf_id = 0;
+  unsigned long last_kf_id = 0;
+  double scale = 1.0;
+  Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
+  Eigen::Vector3d gravity_camera = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gravity_body = Eigen::Vector3d::Zero();
+  Sophus::SE3f Tcw;
+  Sophus::SE3f ref_Twc;
+  Sophus::SE3f first_Twc;
+  Sophus::SE3f last_Twc;
+  std::vector<Eigen::Vector3f> map_points;
+  AlignmentReprojectionStats reprojection;
+};
+
 std::string FormatVector3Compact(const Eigen::Vector3f& v)
 {
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3) << "(" << v.x() << "," << v.y() << "," << v.z()
          << ")";
   return stream.str();
+}
+
+std::string FormatVector3Compact(const Eigen::Vector3d& v)
+{
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(3) << "(" << v.x() << "," << v.y() << "," << v.z()
+         << ")";
+  return stream.str();
+}
+
+std::string FormatRpyDegCompact(const Eigen::Matrix3f& R)
+{
+  const Eigen::Vector3f rpy = R.eulerAngles(0, 1, 2) * 180.0f / static_cast<float>(M_PI);
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(1) << "(" << rpy.x() << "," << rpy.y() << "," << rpy.z()
+         << ")";
+  return stream.str();
+}
+
+std::string FormatMapPointSample(const std::vector<Eigen::Vector3f>& points, size_t index)
+{
+  if (index >= points.size())
+    return "na";
+
+  return FormatVector3Compact(points[index]);
 }
 
 double RotationAngleRad(const Eigen::Matrix3f& Rcw1, const Eigen::Matrix3f& Rcw2)
@@ -77,6 +132,168 @@ double GravityDeltaDeg(const Eigen::Vector3d& g1, const Eigen::Vector3d& g2)
 
   const double cos_angle = std::max(-1.0, std::min(1.0, g1.normalized().dot(g2.normalized())));
   return std::acos(cos_angle) * 180.0 / M_PI;
+}
+
+AlignmentReprojectionStats ComputeAlignmentReprojectionStats(Frame& frame)
+{
+  AlignmentReprojectionStats stats;
+  if (!frame.mpCamera || !frame.HasPose())
+    return stats;
+
+  std::vector<double> errors;
+  const Sophus::SE3f Tcw = frame.GetPose();
+  const int nLeft = frame.Nleft != -1 ? std::min(frame.Nleft, frame.N) : frame.N;
+  for (int i = 0; i < nLeft; ++i)
+  {
+    if (i >= static_cast<int>(frame.mvpMapPoints.size()) ||
+        i >= static_cast<int>(frame.mvKeysUn.size()))
+      continue;
+
+    MapPoint* pMP = frame.mvpMapPoints[i];
+    if (!pMP || pMP->isBad())
+      continue;
+
+    ++stats.matches;
+    if (i < static_cast<int>(frame.mvbOutlier.size()) && !frame.mvbOutlier[i])
+      ++stats.inliers;
+
+    const Eigen::Vector3f Pc = Tcw * pMP->GetWorldPos();
+    if (Pc(2) <= 0.0f)
+      continue;
+
+    const Eigen::Vector2f uv = frame.mpCamera->project(Pc);
+    if (!std::isfinite(uv(0)) || !std::isfinite(uv(1)))
+      continue;
+
+    ++stats.projected;
+    const cv::KeyPoint& keypoint = frame.mvKeysUn[i];
+    const double dx = static_cast<double>(keypoint.pt.x) - static_cast<double>(uv(0));
+    const double dy = static_cast<double>(keypoint.pt.y) - static_cast<double>(uv(1));
+    const double error = std::sqrt(dx * dx + dy * dy);
+    errors.push_back(error);
+    stats.max_error = std::max(stats.max_error, error);
+  }
+
+  if (!errors.empty())
+  {
+    std::sort(errors.begin(), errors.end());
+    stats.median_error = errors[errors.size() / 2];
+  }
+
+  return stats;
+}
+
+AlignmentTraceSnapshot CaptureAlignmentTraceSnapshot(Tracking* tracker,
+                                                     KeyFrame* current_keyframe,
+                                                     double scale,
+                                                     const Eigen::Matrix3d& Rwg,
+                                                     const std::vector<KeyFrame*>& keyframes)
+{
+  AlignmentTraceSnapshot snapshot;
+  if (!tracker || !current_keyframe)
+    return snapshot;
+
+  Map* map = current_keyframe->GetMap();
+  snapshot.valid = true;
+  snapshot.frame_id = tracker->mCurrentFrame.mnId;
+  snapshot.keyframe_id = current_keyframe->mnId;
+  snapshot.map_id = map ? map->GetId() : 0;
+  snapshot.scale = scale;
+  snapshot.gravity_world = Rwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+  snapshot.Tcw = tracker->mCurrentFrame.GetPose();
+  snapshot.gravity_camera = snapshot.Tcw.rotationMatrix().cast<double>() * snapshot.gravity_world;
+  snapshot.gravity_body = tracker->mCurrentFrame.mImuCalib.mTbc.rotationMatrix().cast<double>() *
+                          snapshot.gravity_camera;
+  snapshot.reprojection = ComputeAlignmentReprojectionStats(tracker->mCurrentFrame);
+
+  KeyFrame* ref_keyframe = tracker->mCurrentFrame.mpReferenceKF
+                               ? tracker->mCurrentFrame.mpReferenceKF
+                               : current_keyframe;
+  KeyFrame* first_keyframe = keyframes.empty() ? current_keyframe : keyframes.front();
+  KeyFrame* last_keyframe = keyframes.empty() ? current_keyframe : keyframes.back();
+  snapshot.ref_kf_id = ref_keyframe ? ref_keyframe->mnId : 0;
+  snapshot.first_kf_id = first_keyframe ? first_keyframe->mnId : 0;
+  snapshot.last_kf_id = last_keyframe ? last_keyframe->mnId : 0;
+  snapshot.ref_Twc = ref_keyframe ? ref_keyframe->GetPoseInverse() : Sophus::SE3f();
+  snapshot.first_Twc = first_keyframe ? first_keyframe->GetPoseInverse() : Sophus::SE3f();
+  snapshot.last_Twc = last_keyframe ? last_keyframe->GetPoseInverse() : Sophus::SE3f();
+
+  for (MapPoint* map_point : tracker->mCurrentFrame.mvpMapPoints)
+  {
+    if (!map_point || map_point->isBad())
+      continue;
+
+    snapshot.map_points.push_back(map_point->GetWorldPos());
+    if (snapshot.map_points.size() == 3)
+      break;
+  }
+
+  return snapshot;
+}
+
+void LogAlignmentTrace(const std::string& event_name,
+                       const AlignmentTraceSnapshot& before,
+                       const AlignmentTraceSnapshot& after)
+{
+  if (!before.valid || !after.valid)
+    return;
+
+  const Sophus::SE3f beforeTwc = before.Tcw.inverse();
+  const Sophus::SE3f afterTwc = after.Tcw.inverse();
+  const Eigen::Matrix3f dRcw = after.Tcw.rotationMatrix() * before.Tcw.rotationMatrix().transpose();
+  const Eigen::Vector3f dTwc = afterTwc.translation() - beforeTwc.translation();
+  const double dRdeg =
+      RotationAngleRad(after.Tcw.rotationMatrix(), before.Tcw.rotationMatrix()) * 180.0 / M_PI;
+  const double dTwcDeg =
+      RotationAngleRad(afterTwc.rotationMatrix(), beforeTwc.rotationMatrix()) * 180.0 / M_PI;
+  const double dscale = after.scale - before.scale;
+
+  std::cout << "MI align_candidate:" << " event=" << event_name << " s_before=" << before.scale
+            << " s_after=" << after.scale << " dscale=" << dscale
+            << " dR_rpy=" << FormatRpyDegCompact(dRcw) << " dR_angle=" << dRdeg
+            << " dt=" << FormatVector3Compact(dTwc)
+            << " gravity_before_world=" << FormatVector3Compact(before.gravity_world)
+            << " gravity_after_world=" << FormatVector3Compact(after.gravity_world)
+            << " gravity_before_camera=" << FormatVector3Compact(before.gravity_camera)
+            << " gravity_after_camera=" << FormatVector3Compact(after.gravity_camera)
+            << " gravity_before_body=" << FormatVector3Compact(before.gravity_body)
+            << " gravity_after_body=" << FormatVector3Compact(after.gravity_body) << std::endl;
+
+  std::cout << "MI align_pose:" << " event=" << event_name
+            << " Tcw_before_rpy=" << FormatRpyDegCompact(before.Tcw.rotationMatrix())
+            << " Tcw_after_rpy=" << FormatRpyDegCompact(after.Tcw.rotationMatrix())
+            << " Twc_before_rpy=" << FormatRpyDegCompact(beforeTwc.rotationMatrix())
+            << " Twc_after_rpy=" << FormatRpyDegCompact(afterTwc.rotationMatrix())
+            << " dTcw_angle=" << dRdeg << " dTwc_angle=" << dTwcDeg
+            << " dTwc_xyz=" << FormatVector3Compact(dTwc) << " frame_id=" << after.frame_id
+            << " keyframe_id=" << after.keyframe_id << " map_id=" << after.map_id << std::endl;
+
+  std::cout << "MI align_map_sample:" << " event=" << event_name << " ref_kf=" << after.ref_kf_id
+            << " first_kf=" << after.first_kf_id << " last_kf=" << after.last_kf_id
+            << " ref_Twc_before_rpy=" << FormatRpyDegCompact(before.ref_Twc.rotationMatrix())
+            << " ref_Twc_after_rpy=" << FormatRpyDegCompact(after.ref_Twc.rotationMatrix())
+            << " first_Twc_before_rpy=" << FormatRpyDegCompact(before.first_Twc.rotationMatrix())
+            << " first_Twc_after_rpy=" << FormatRpyDegCompact(after.first_Twc.rotationMatrix())
+            << " last_Twc_before_rpy=" << FormatRpyDegCompact(before.last_Twc.rotationMatrix())
+            << " last_Twc_after_rpy=" << FormatRpyDegCompact(after.last_Twc.rotationMatrix())
+            << " mp0_before=" << FormatMapPointSample(before.map_points, 0)
+            << " mp0_after=" << FormatMapPointSample(after.map_points, 0)
+            << " mp1_before=" << FormatMapPointSample(before.map_points, 1)
+            << " mp1_after=" << FormatMapPointSample(after.map_points, 1)
+            << " mp2_before=" << FormatMapPointSample(before.map_points, 2)
+            << " mp2_after=" << FormatMapPointSample(after.map_points, 2) << std::endl;
+
+  std::cout << "MI align_reproject:" << " event=" << event_name
+            << " before_proj=" << before.reprojection.projected
+            << " before_matches=" << before.reprojection.matches
+            << " before_inliers=" << before.reprojection.inliers
+            << " after_proj=" << after.reprojection.projected
+            << " after_matches=" << after.reprojection.matches
+            << " after_inliers=" << after.reprojection.inliers
+            << " before_median_err=" << before.reprojection.median_error
+            << " after_median_err=" << after.reprojection.median_error
+            << " before_max_err=" << before.reprojection.max_error
+            << " after_max_err=" << after.reprojection.max_error << std::endl;
 }
 
 InertialUpdateSnapshot CaptureInertialUpdateSnapshot(LocalMapping* local_mapper, KeyFrame* keyframe)
@@ -192,6 +409,9 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mLastViba1Time = -1.0;
     mLastViba1KfId = 0;
     mInitialImuKeyframeId = 0;
+    mLastAlignmentEvent = "none";
+    mLastAlignmentRotationDeg = 0.0;
+    mLastAlignmentScale = 1.0;
 
     mTinit = 0.f;
 
@@ -1412,6 +1632,9 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         return;
 
     bInitializing = true;
+    const bool map_was_imu_initialized = mpAtlas->isImuInitialized();
+    const std::string alignment_event =
+        !map_was_imu_initialized ? "init_accepted" : (priorA != 0.f ? "viba_1" : "viba_2");
 
     while(CheckNewKeyFrames())
     {
@@ -1484,6 +1707,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
          << " ba=" << mba.norm() << " bg=" << mbg.norm() << " priorG=" << priorG
          << " priorA=" << priorA << " fiba=" << bFIBA << endl;
 
+    const AlignmentTraceSnapshot align_before =
+        CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
+    AlignmentTraceSnapshot full_ba_before;
+
     // Before this line we are not changing the map
     {
         std::unique_lock<std::mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
@@ -1492,6 +1719,17 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
         }
+
+        const AlignmentTraceSnapshot align_after =
+            CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
+        LogAlignmentTrace(alignment_event, align_before, align_after);
+        mLastAlignmentEvent = alignment_event;
+        mLastAlignmentRotationDeg =
+            RotationAngleRad(align_after.Tcw.rotationMatrix(), align_before.Tcw.rotationMatrix()) *
+            180.0 / M_PI;
+        mLastAlignmentScale = mScale;
+        if (bFIBA)
+          full_ba_before = align_after;
 
         // Check if initialization OK
         if (!mpAtlas->isImuInitialized())
@@ -1629,6 +1867,18 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     mlNewKeyFrames.clear();
 
     mpTracker->mState=Tracking::OK;
+    if (bFIBA)
+    {
+      const AlignmentTraceSnapshot full_ba_after =
+          CaptureAlignmentTraceSnapshot(mpTracker, mpCurrentKeyFrame, mScale, mRwg, vpKF);
+      LogAlignmentTrace("full_inertial_ba", full_ba_before, full_ba_after);
+      mLastAlignmentEvent = "full_inertial_ba";
+      mLastAlignmentRotationDeg = RotationAngleRad(full_ba_after.Tcw.rotationMatrix(),
+                                                   full_ba_before.Tcw.rotationMatrix()) *
+                                  180.0 / M_PI;
+      mLastAlignmentScale = mScale;
+    }
+
     bInitializing = false;
 
     mpCurrentKeyFrame->GetMap()->IncreaseChangeIndex();

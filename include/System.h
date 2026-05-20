@@ -52,6 +52,9 @@ struct InertialStateDiagnostic
   int local_matches = 0;
   int map_points = 0;
   double scale = 1.0;
+  double last_alignment_rotation_deg = 0.0;
+  double last_alignment_scale = 1.0;
+  std::string last_alignment_event;
   Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
   Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
   Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();

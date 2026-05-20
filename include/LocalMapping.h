@@ -107,6 +107,9 @@ public:
     double mLastViba1Time;
     unsigned long mLastViba1KfId;
     unsigned long mInitialImuKeyframeId;
+    std::string mLastAlignmentEvent;
+    double mLastAlignmentRotationDeg;
+    double mLastAlignmentScale;
 
     bool mbWriteStats;
 

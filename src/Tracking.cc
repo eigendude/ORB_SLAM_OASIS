@@ -226,6 +226,9 @@ InertialStateDiagnostic Tracking::GetInertialStateDiagnostic() const
   {
     diagnostic.scale = mpLocalMapper->mScale;
     diagnostic.gravity_world = mpLocalMapper->mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+    diagnostic.last_alignment_event = mpLocalMapper->mLastAlignmentEvent;
+    diagnostic.last_alignment_rotation_deg = mpLocalMapper->mLastAlignmentRotationDeg;
+    diagnostic.last_alignment_scale = mpLocalMapper->mLastAlignmentScale;
   }
 
   if (mCurrentFrame.isSet())
