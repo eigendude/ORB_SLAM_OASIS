@@ -109,6 +109,7 @@ public:
     unsigned long mInitialImuKeyframeId;
     unsigned long mInertialInitAttemptId;
     bool mLastInitLifecycleCommitted;
+    bool mFinalInitEpochValid;
     std::string mLastAlignmentEvent;
     double mLastAlignmentRotationDeg;
     double mLastAlignmentScale;

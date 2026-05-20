@@ -90,6 +90,19 @@ struct AlignmentTraceSnapshot
   AlignmentReprojectionStats reprojection;
 };
 
+struct FinalInitEpochCheck
+{
+  Eigen::Vector3d gravity_body = Eigen::Vector3d::Zero();
+  AlignmentReprojectionStats reprojection;
+  bool new_ok = false;
+  bool pose_identity_like = false;
+  bool reprojection_ok = false;
+  bool will_commit = false;
+  std::string reason = "unavailable";
+};
+
+AlignmentReprojectionStats ComputeAlignmentReprojectionStats(Frame& frame);
+
 std::string FormatVector3Compact(const Eigen::Vector3f& v)
 {
   std::ostringstream stream;
@@ -175,6 +188,61 @@ double GravityDeltaDeg(const Eigen::Vector3d& g1, const Eigen::Vector3d& g2)
 
   const double cos_angle = std::max(-1.0, std::min(1.0, g1.normalized().dot(g2.normalized())));
   return std::acos(cos_angle) * 180.0 / M_PI;
+}
+
+FinalInitEpochCheck CheckFinalInitEpoch(Tracking* tracker)
+{
+  FinalInitEpochCheck check;
+  if (!tracker)
+  {
+    check.reason = "no_tracker";
+    return check;
+  }
+
+  const Sophus::SE3f Tcw = tracker->mCurrentFrame.GetPose();
+  const Eigen::Vector3d g_new_world(0.0, 0.0, -1.0);
+  const Eigen::Vector3d gravity_camera = Tcw.rotationMatrix().cast<double>() * g_new_world;
+  const Eigen::Matrix3d Rbc = tracker->mCurrentFrame.mImuCalib.mTbc.rotationMatrix().cast<double>();
+  check.gravity_body = Rbc * gravity_camera;
+  check.new_ok = UnitDot(check.gravity_body, -Eigen::Vector3d::UnitZ()) > 0.9;
+  check.reprojection = ComputeAlignmentReprojectionStats(tracker->mCurrentFrame);
+  check.reprojection_ok = check.reprojection.projected > 0 && check.reprojection.inliers > 0;
+  check.pose_identity_like =
+      RotationAngleRad(Tcw.rotationMatrix(), Eigen::Matrix3f::Identity()) < M_PI / 180.0 &&
+      Tcw.translation().norm() < 1e-4f;
+
+  if (!check.new_ok)
+    check.reason = "post_ba_epoch_mismatch";
+  else if (!check.reprojection_ok)
+    check.reason = "post_ba_reprojection_empty";
+  else if (check.pose_identity_like)
+    check.reason = "post_ba_pose_reset";
+  else
+  {
+    check.will_commit = true;
+    check.reason = "ok";
+  }
+
+  return check;
+}
+
+void LogFinalInitEpochCheck(const unsigned long attempt_id,
+                            const char* phase,
+                            const std::string& last_alignment_event,
+                            const double last_alignment_dR,
+                            const FinalInitEpochCheck& check)
+{
+  std::cout << "MI init_final_epoch_check:" << " attempt=" << attempt_id << " phase=" << phase
+            << " last_alignment_event=" << last_alignment_event
+            << " last_alignment_dR=" << last_alignment_dR
+            << " gravity_body=" << FormatVector3Compact(check.gravity_body) << "/"
+            << SignedAxisName(check.gravity_body) << " new_ok=" << (check.new_ok ? 1 : 0)
+            << " reproj=" << check.reprojection.projected
+            << " matches=" << check.reprojection.matches
+            << " inliers=" << check.reprojection.inliers
+            << " pose_identity_like=" << (check.pose_identity_like ? 1 : 0)
+            << " will_commit=" << (check.will_commit ? 1 : 0) << " reason=" << check.reason
+            << std::endl;
 }
 
 AlignmentReprojectionStats ComputeAlignmentReprojectionStats(Frame& frame)
@@ -517,6 +585,7 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mInitialImuKeyframeId = 0;
     mInertialInitAttemptId = 0;
     mLastInitLifecycleCommitted = false;
+    mFinalInitEpochValid = false;
     mLastAlignmentEvent = "none";
     mLastAlignmentRotationDeg = 0.0;
     mLastAlignmentScale = 1.0;
@@ -554,7 +623,7 @@ bool LocalMapping::IsInertialInitializationCommitted() const
   if (pMap == nullptr || !pMap->isImuInitialized() || mbBadImu)
     return false;
 
-  return !IsInertialInitializationProvisional();
+  return !IsInertialInitializationProvisional() && mFinalInitEpochValid;
 }
 
 void LocalMapping::SetLoopCloser(LoopClosing* pLoopCloser)
@@ -676,17 +745,46 @@ void LocalMapping::Run()
                           mbBadImu = true;
                         }
                       }
-                      if (!motion_check_not_enough && IsInertialInitializationCommitted() &&
-                          !mLastInitLifecycleCommitted)
+                      const bool init_ready_for_commit =
+                          !motion_check_not_enough && !mbBadImu &&
+                          mpCurrentKeyFrame->GetMap()->isImuInitialized() &&
+                          !IsInertialInitializationProvisional();
+                      if (init_ready_for_commit && !mLastInitLifecycleCommitted)
                       {
-                        mLastInitLifecycleCommitted = true;
-                        std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
-                                  << " phase=motion_check after_align=1 map_imu=1"
-                                  << " tracking_state=" << mpTracker->mState
-                                  << " bad_imu=0 motion=ok should_publish=1 committed=1 reset=0"
-                                  << " mTinit=" << mTinit << " dist=" << dist
-                                  << " kfs=" << mpAtlas->KeyFramesInMap()
-                                  << " map=" << mpAtlas->MapPointsInMap() << std::endl;
+                        const FinalInitEpochCheck final_epoch_check =
+                            CheckFinalInitEpoch(mpTracker);
+                        LogFinalInitEpochCheck(mInertialInitAttemptId, "pre_commit",
+                                               mLastAlignmentEvent, mLastAlignmentRotationDeg,
+                                               final_epoch_check);
+                        if (!final_epoch_check.will_commit)
+                        {
+                          std::cout << "MI init_rejected:" << " reason=" << final_epoch_check.reason
+                                    << " phase=pre_commit" << " mTinit=" << mTinit
+                                    << " kfs=" << mpAtlas->KeyFramesInMap()
+                                    << " map=" << mpAtlas->MapPointsInMap() << std::endl;
+                          if (mpTracker)
+                          {
+                            mpTracker->RecordTrackingFailure(TrackingFailureReason::BadImu,
+                                                             mpCurrentKeyFrame->mTimeStamp);
+                          }
+                          std::unique_lock<std::mutex> lock(mMutexReset);
+                          mbResetRequestedActiveMap = true;
+                          mpMapToReset = mpCurrentKeyFrame->GetMap();
+                          mbBadImu = true;
+                          mFinalInitEpochValid = false;
+                        }
+                        else
+                        {
+                          mFinalInitEpochValid = true;
+                          mLastInitLifecycleCommitted = true;
+                          std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
+                                    << " phase=motion_check after_align=1 map_imu=1"
+                                    << " tracking_state=" << mpTracker->mState
+                                    << " bad_imu=0 motion=ok should_publish=1 committed=1 reset=0"
+                                    << " mTinit=" << mTinit << " dist=" << dist
+                                    << " kfs=" << mpAtlas->KeyFramesInMap()
+                                    << " map=" << mpAtlas->MapPointsInMap() << std::endl;
+                        }
                       }
 
                         bool bLarge = ((mpTracker->GetMatchesInliers()>75)&&mbMonocular)||((mpTracker->GetMatchesInliers()>100)&&!mbMonocular);
@@ -1696,8 +1794,9 @@ void LocalMapping::ResetIfRequested()
             mTinit = 0.f;
             mbNotBA2 = true;
             mbNotBA1 = true;
-            mbBadImu=false;
+            mbBadImu = false;
             mLastInitLifecycleCommitted = false;
+            mFinalInitEpochValid = false;
 
             mIdxInit=0;
 
@@ -1714,8 +1813,9 @@ void LocalMapping::ResetIfRequested()
             mTinit = 0.f;
             mbNotBA2 = true;
             mbNotBA1 = true;
-            mbBadImu=false;
+            mbBadImu = false;
             mLastInitLifecycleCommitted = false;
+            mFinalInitEpochValid = false;
 
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
@@ -1801,6 +1901,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     {
       ++mInertialInitAttemptId;
       mLastInitLifecycleCommitted = false;
+      mFinalInitEpochValid = false;
     }
 
     bInitializing = true;
@@ -2155,7 +2256,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     }
     mlNewKeyFrames.clear();
 
-    mpTracker->mState=Tracking::OK;
+    mpTracker->mState = Tracking::OK;
+    if (bFIBA && mpTracker && mpCurrentKeyFrame)
+      mpTracker->mCurrentFrame.SetPose(mpCurrentKeyFrame->GetPose());
+
     if (bFIBA)
     {
       const AlignmentTraceSnapshot full_ba_after = CaptureAlignmentTraceSnapshot(
@@ -2166,6 +2270,33 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
                                                    full_ba_before.Tcw.rotationMatrix()) *
                                   180.0 / M_PI;
       mLastAlignmentScale = mScale;
+    }
+
+    if (mbMonocular && mbInertial && mpAtlas->isImuInitialized())
+    {
+      const FinalInitEpochCheck final_epoch_check = CheckFinalInitEpoch(mpTracker);
+      LogFinalInitEpochCheck(mInertialInitAttemptId, "pre_commit", mLastAlignmentEvent,
+                             mLastAlignmentRotationDeg, final_epoch_check);
+      if (!final_epoch_check.will_commit)
+      {
+        std::cout << "MI init_rejected:" << " reason=" << final_epoch_check.reason
+                  << " phase=pre_commit" << " mTinit=" << mTinit
+                  << " kfs=" << mpAtlas->KeyFramesInMap() << " map=" << mpAtlas->MapPointsInMap()
+                  << std::endl;
+        if (mpTracker)
+        {
+          mpTracker->RecordTrackingFailure(TrackingFailureReason::BadImu,
+                                           mpCurrentKeyFrame->mTimeStamp);
+        }
+        std::unique_lock<std::mutex> reset_lock(mMutexReset);
+        mbResetRequestedActiveMap = true;
+        mpMapToReset = mpCurrentKeyFrame->GetMap();
+        mbBadImu = true;
+        mFinalInitEpochValid = false;
+        bInitializing = false;
+        return;
+      }
+      mFinalInitEpochValid = true;
     }
 
     bInitializing = false;
