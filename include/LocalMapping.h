@@ -104,6 +104,9 @@ public:
     bool mbNotBA1;
     bool mbNotBA2;
     bool mbBadImu;
+    double mLastViba1Time;
+    unsigned long mLastViba1KfId;
+    unsigned long mInitialImuKeyframeId;
 
     bool mbWriteStats;
 

@@ -18,17 +18,168 @@
 
 
 #include "LocalMapping.h"
+
+#include "Converter.h"
+#include "GeometricTools.h"
 #include "LoopClosing.h"
 #include "ORBmatcher.h"
 #include "Optimizer.h"
-#include "Converter.h"
-#include "GeometricTools.h"
 
-#include<mutex>
-#include<chrono>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
+#include <mutex>
+#include <sstream>
 
 namespace ORB_SLAM3
 {
+
+namespace
+{
+constexpr double kVibaBiasJumpDiagnosticSeconds = 3.0;
+constexpr long kVibaBiasJumpDiagnosticKeyframes = 20;
+
+struct InertialUpdateSnapshot
+{
+  bool valid = false;
+  unsigned long keyframe_id = 0;
+  double timestamp = 0.0;
+  double scale = 1.0;
+  Eigen::Vector3d gravity = Eigen::Vector3d(0.0, 0.0, -1.0);
+  Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
+  Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();
+  Eigen::Vector3f accel_bias = Eigen::Vector3f::Zero();
+  Sophus::SE3f pose;
+  size_t map_points = 0;
+};
+
+std::string FormatVector3Compact(const Eigen::Vector3f& v)
+{
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(3) << "(" << v.x() << "," << v.y() << "," << v.z()
+         << ")";
+  return stream.str();
+}
+
+double RotationAngleRad(const Eigen::Matrix3f& Rcw1, const Eigen::Matrix3f& Rcw2)
+{
+  const Eigen::Matrix3f dR = Rcw1 * Rcw2.transpose();
+  const double cos_angle =
+      std::max(-1.0, std::min(1.0, 0.5 * (static_cast<double>(dR.trace()) - 1.0)));
+  return std::acos(cos_angle);
+}
+
+double GravityDeltaDeg(const Eigen::Vector3d& g1, const Eigen::Vector3d& g2)
+{
+  if (g1.norm() < 1e-9 || g2.norm() < 1e-9)
+    return -1.0;
+
+  const double cos_angle = std::max(-1.0, std::min(1.0, g1.normalized().dot(g2.normalized())));
+  return std::acos(cos_angle) * 180.0 / M_PI;
+}
+
+InertialUpdateSnapshot CaptureInertialUpdateSnapshot(LocalMapping* local_mapper, KeyFrame* keyframe)
+{
+  InertialUpdateSnapshot snapshot;
+  snapshot.valid = keyframe != NULL;
+  snapshot.scale = local_mapper->mScale;
+  snapshot.gravity = local_mapper->mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+
+  if (keyframe != NULL)
+  {
+    snapshot.keyframe_id = keyframe->mnId;
+    snapshot.timestamp = keyframe->mTimeStamp;
+    if (keyframe->GetMap())
+      snapshot.map_points = keyframe->GetMap()->MapPointsInMap();
+    snapshot.velocity = keyframe->GetVelocity();
+    snapshot.gyro_bias = keyframe->GetGyroBias();
+    snapshot.accel_bias = keyframe->GetAccBias();
+    snapshot.pose = keyframe->GetPose();
+  }
+
+  return snapshot;
+}
+
+void LogInertialUpdateEvent(const std::string& event_name,
+                            const InertialUpdateSnapshot& before,
+                            const InertialUpdateSnapshot& after,
+                            const bool map_points_transformed)
+{
+  if (!before.valid || !after.valid)
+    return;
+
+  const Sophus::SE3f beforeTwc = before.pose.inverse();
+  const Sophus::SE3f afterTwc = after.pose.inverse();
+  const Eigen::Vector3f dxyz = afterTwc.translation() - beforeTwc.translation();
+  const double dr_deg =
+      RotationAngleRad(beforeTwc.rotationMatrix(), afterTwc.rotationMatrix()) * 180.0 / M_PI;
+
+  if (event_name == "init_accepted" || event_name == "viba_1")
+  {
+    std::cout << "MI inertial_event:" << " ev=" << event_name << " s=" << before.scale << "->"
+              << after.scale << " dg=" << GravityDeltaDeg(before.gravity, after.gravity)
+              << " dr=" << dr_deg << " dpos=" << dxyz.norm() << " pts=" << before.map_points << "->"
+              << after.map_points << " mp_xform=" << map_points_transformed
+              << " ba=" << after.accel_bias.norm() << " bg=" << after.gyro_bias.norm() << std::endl;
+  }
+}
+
+void LogLocalInertialBA(const InertialUpdateSnapshot& before,
+                        const InertialUpdateSnapshot& after,
+                        const Optimizer::LocalInertialBADiagnostic& diagnostic,
+                        const double since_viba_sec,
+                        const long since_viba_kfs)
+{
+  if (!before.valid || !after.valid)
+    return;
+
+  const Sophus::SE3f beforeTwc = before.pose.inverse();
+  const Sophus::SE3f afterTwc = after.pose.inverse();
+  const Eigen::Vector3f dxyz = afterTwc.translation() - beforeTwc.translation();
+  const double dr_deg =
+      RotationAngleRad(beforeTwc.rotationMatrix(), afterTwc.rotationMatrix()) * 180.0 / M_PI;
+  const Eigen::Vector3f dbg = after.gyro_bias - before.gyro_bias;
+  const Eigen::Vector3f dba = after.accel_bias - before.accel_bias;
+  const bool map_drop = before.map_points > 0 && after.map_points * 10 < before.map_points * 9;
+  static double last_log_time = -1e9;
+  const bool enough_time = after.timestamp - last_log_time >= 1.0;
+  const bool significant = dba.norm() > 0.03f || after.accel_bias.norm() > 0.12f || dr_deg > 1.0 ||
+                           dxyz.norm() > 0.05f || map_drop;
+
+  if (enough_time || significant)
+  {
+    last_log_time = after.timestamp;
+    std::cout << "MI iba:" << " s=" << after.scale << " kfs=" << diagnostic.optimized_keyframes
+              << "/" << diagnostic.fixed_keyframes << " edges=" << diagnostic.visual_edges << "/"
+              << diagnostic.inertial_edges << "/" << diagnostic.bias_random_walk_edges
+              << " pts=" << before.map_points << "->" << after.map_points
+              << " ba=" << after.accel_bias.norm() << " dba=" << dba.norm()
+              << " bg=" << after.gyro_bias.norm() << " dbg=" << dbg.norm()
+              << " chi_v=" << diagnostic.visual_chi2_before << "->" << diagnostic.visual_chi2_after
+              << " chi_i=" << diagnostic.inertial_chi2_before << "->"
+              << diagnostic.inertial_chi2_after << " dr=" << dr_deg << " dpos=" << dxyz.norm()
+              << " vel=" << after.velocity.norm() << " bias_src=current_kf_optimizer" << std::endl;
+  }
+
+  const bool post_viba_diag_window =
+      since_viba_sec >= 0.0 && (since_viba_sec <= kVibaBiasJumpDiagnosticSeconds ||
+                                since_viba_kfs <= kVibaBiasJumpDiagnosticKeyframes);
+  if (post_viba_diag_window && dba.norm() > 0.05f)
+  {
+    std::cout << "MI ba_jump:" << " since_viba=" << since_viba_sec << "s/" << since_viba_kfs << "kf"
+              << " ba_before=" << FormatVector3Compact(before.accel_bias)
+              << " ba_after=" << FormatVector3Compact(after.accel_bias) << " dba=" << dba.norm()
+              << " inertial_chi2=" << diagnostic.inertial_chi2_before << "->"
+              << diagnostic.inertial_chi2_after << " visual_chi2=" << diagnostic.visual_chi2_before
+              << "->" << diagnostic.visual_chi2_after << " kfs=" << diagnostic.optimized_keyframes
+              << "/" << diagnostic.fixed_keyframes << " edges=" << diagnostic.visual_edges << "/"
+              << diagnostic.inertial_edges << "/" << diagnostic.bias_random_walk_edges
+              << " curve=na" << std::endl;
+  }
+}
+
+} // namespace
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
     mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
@@ -38,6 +189,9 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mnMatchesInliers = 0;
 
     mbBadImu = false;
+    mLastViba1Time = -1.0;
+    mLastViba1KfId = 0;
+    mInitialImuKeyframeId = 0;
 
     mTinit = 0.f;
 
@@ -137,13 +291,18 @@ void LocalMapping::Run()
                         {
                             if((mTinit<10.f) && (dist<0.02))
                             {
-                                cout << "Not enough motion for initializing. Reseting..." << endl;
-                                if(mpTracker)
-                                {
-                                    mpTracker->RecordTrackingFailure(
-                                        TrackingFailureReason::NotEnoughMotionForImuInitialization,
-                                        mpCurrentKeyFrame->mTimeStamp);
-                                }
+                              std::cout << "MI init_rejected:" << " reason=not_enough_motion"
+                                        << " mTinit=" << mTinit << " dist=" << dist
+                                        << " kfs=" << mpAtlas->KeyFramesInMap()
+                                        << " map=" << mpAtlas->MapPointsInMap()
+                                        << " inl=" << mpTracker->GetMatchesInliers() << std::endl;
+                              cout << "Not enough motion for initializing. Reseting..." << endl;
+                              if (mpTracker)
+                              {
+                                mpTracker->RecordTrackingFailure(
+                                    TrackingFailureReason::NotEnoughMotionForImuInitialization,
+                                    mpCurrentKeyFrame->mTimeStamp);
+                              }
                                 std::unique_lock<std::mutex> lock(mMutexReset);
                                 mbResetRequestedActiveMap = true;
                                 mpMapToReset = mpCurrentKeyFrame->GetMap();
@@ -152,7 +311,23 @@ void LocalMapping::Run()
                         }
 
                         bool bLarge = ((mpTracker->GetMatchesInliers()>75)&&mbMonocular)||((mpTracker->GetMatchesInliers()>100)&&!mbMonocular);
-                        Optimizer::LocalInertialBA(mpCurrentKeyFrame, &mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA, bLarge, !mpCurrentKeyFrame->GetMap()->GetIniertialBA2());
+                        const InertialUpdateSnapshot before_inertial_ba =
+                            CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
+                        Optimizer::LocalInertialBADiagnostic iba_diagnostic;
+                        const double since_viba_sec =
+                            mLastViba1Time >= 0.0 ? mpCurrentKeyFrame->mTimeStamp - mLastViba1Time
+                                                  : -1.0;
+                        const long since_viba_kfs =
+                            mLastViba1Time >= 0.0 ? static_cast<long>(mpCurrentKeyFrame->mnId) -
+                                                        static_cast<long>(mLastViba1KfId)
+                                                  : -1;
+                        Optimizer::LocalInertialBA(
+                            mpCurrentKeyFrame, &mbAbortBA, mpCurrentKeyFrame->GetMap(),
+                            num_FixedKF_BA, num_OptKF_BA, num_MPs_BA, num_edges_BA, bLarge,
+                            !mpCurrentKeyFrame->GetMap()->GetIniertialBA2(), &iba_diagnostic);
+                        LogLocalInertialBA(before_inertial_ba,
+                                           CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame),
+                                           iba_diagnostic, since_viba_sec, since_viba_kfs);
                         b_doneLBA = true;
                     }
                     else
@@ -186,10 +361,18 @@ void LocalMapping::Run()
                 // Initialize IMU here
                 if(!mpCurrentKeyFrame->GetMap()->isImuInitialized() && mbInertial)
                 {
-                    if (mbMonocular)
-                        InitializeIMU(1e2, 1e10, true);
-                    else
-                        InitializeIMU(1e2, 1e5, true);
+                  const InertialUpdateSnapshot before_init =
+                      CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
+                  if (mbMonocular)
+                    InitializeIMU(1e2, 1e10, true);
+                  else
+                    InitializeIMU(1e2, 1e5, true);
+                  if (mpCurrentKeyFrame->GetMap()->isImuInitialized())
+                  {
+                    LogInertialUpdateEvent("init_accepted", before_init,
+                                           CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame),
+                                           true);
+                  }
                 }
 
 
@@ -212,10 +395,17 @@ void LocalMapping::Run()
                             {
                                 cout << "start VIBA 1" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA1();
+                                const InertialUpdateSnapshot before_viba =
+                                    CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
                                 if (mbMonocular)
                                     InitializeIMU(1.f, 1e5, true);
                                 else
                                     InitializeIMU(1.f, 1e5, true);
+                                LogInertialUpdateEvent(
+                                    "viba_1", before_viba,
+                                    CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame), true);
+                                mLastViba1Time = mpCurrentKeyFrame->mTimeStamp;
+                                mLastViba1KfId = mpCurrentKeyFrame->mnId;
 
                                 cout << "end VIBA 1" << endl;
                             }
@@ -224,10 +414,15 @@ void LocalMapping::Run()
                             if (mTinit>15.0f){
                                 cout << "start VIBA 2" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
+                                const InertialUpdateSnapshot before_viba =
+                                    CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
                                 if (mbMonocular)
                                     InitializeIMU(0.f, 0.f, true);
                                 else
                                     InitializeIMU(0.f, 0.f, true);
+                                LogInertialUpdateEvent(
+                                    "viba_2", before_viba,
+                                    CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame), true);
 
                                 cout << "end VIBA 2" << endl;
                             }
@@ -1276,10 +1471,18 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     if (mScale<1e-1)
     {
-        cout << "scale too small" << endl;
-        bInitializing=false;
-        return;
+      cout << "MI init_rejected:" << " reason=scale_too_small" << " s=" << mScale << " kfs=" << N
+           << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap() << " dt=" << mInitTime
+           << " ba=" << mba.norm() << " bg=" << mbg.norm() << endl;
+      cout << "scale too small" << endl;
+      bInitializing = false;
+      return;
     }
+
+    cout << "MI init_candidate:" << " s=" << mScale << " kfs=" << N
+         << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap() << " dt=" << mInitTime
+         << " ba=" << mba.norm() << " bg=" << mbg.norm() << " priorG=" << priorG
+         << " priorA=" << priorA << " fiba=" << bFIBA << endl;
 
     // Before this line we are not changing the map
     {
@@ -1304,6 +1507,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         mpAtlas->SetImuInitialized();
         mpTracker->t0IMU = mpTracker->mCurrentFrame.mTimeStamp;
         mpCurrentKeyFrame->bImu = true;
+        mInitialImuKeyframeId = mpCurrentKeyFrame->mnId;
     }
 
     std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();

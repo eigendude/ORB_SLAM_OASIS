@@ -129,6 +129,8 @@ public:
     TrackingFailureReason GetLastTrackingFailureReason() const;
     double GetLastTrackingFailureTimestamp() const;
     const char* GetLastTrackingFailureReasonName() const;
+    InertialStateDiagnostic GetInertialStateDiagnostic() const;
+    void SetDiagnosticsVisualOnlyAfterInit(bool enabled);
 
     //DEBUG
     void SaveSubTrajectory(std::string strNameFile_frames, std::string strNameFile_kf, std::string strFolder="");
@@ -249,6 +251,10 @@ protected:
 
     bool TrackLocalMap();
     void SearchLocalPoints();
+    int CountCurrentFrameMapPointMatches(int* outliers = nullptr) const;
+    double EstimateTrackedMapChi2() const;
+    void LogTrackLocalMapFailure(const char* reason, int minInliers) const;
+    std::string BuildMapPointQualitySummary() const;
 
     bool NeedNewKeyFrame();
     void CreateNewKeyFrame();
@@ -361,6 +367,33 @@ protected:
     //Motion Model
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
+
+    bool mbDiagnosticsVisualOnlyAfterInit = false;
+    bool mbDiagnosticsUsedImuPrediction = false;
+    bool mbDiagnosticsUsedInertialOptimization = false;
+    bool mbDiagnosticsValidLastPose = false;
+    bool mbDiagnosticsValidVisualPrediction = false;
+    bool mbDiagnosticsValidImuPrediction = false;
+    bool mbDiagnosticsValidOptimizedPose = false;
+    bool mbDiagnosticsValidPoseBeforeOptimization = false;
+    int mnDiagnosticsLastOptimizationInliers = 0;
+    int mnDiagnosticsLocalKeyframes = 0;
+    int mnDiagnosticsLocalMapPoints = 0;
+    int mnDiagnosticsProjectedLocalMapPoints = 0;
+    int mnDiagnosticsProjectionMatches = 0;
+    int mnDiagnosticsMatchesBeforeOptimization = 0;
+    int mnDiagnosticsMatchesAfterOptimization = 0;
+    int mnDiagnosticsOutliersAfterOptimization = 0;
+    int mnDiagnosticsLocalSearchRadius = 0;
+    int mnDiagnosticsReferenceKeyframeId = -1;
+    int mnDiagnosticsReferenceKeyframeMatches = 0;
+    double mDiagnosticsChi2BeforeOptimization = -1.0;
+    double mDiagnosticsChi2AfterOptimization = -1.0;
+    Sophus::SE3f mDiagnosticsLastPose;
+    Sophus::SE3f mDiagnosticsVisualPredictionPose;
+    Sophus::SE3f mDiagnosticsImuPredictionPose;
+    Sophus::SE3f mDiagnosticsOptimizedPose;
+    Sophus::SE3f mDiagnosticsPoseBeforeOptimization;
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;

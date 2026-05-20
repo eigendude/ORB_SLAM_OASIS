@@ -46,6 +46,20 @@ class LoopClosing;
 class Optimizer
 {
 public:
+  struct LocalInertialBADiagnostic
+  {
+    int optimized_keyframes = 0;
+    int fixed_keyframes = 0;
+    int visual_edges = 0;
+    int inertial_edges = 0;
+    int bias_random_walk_edges = 0;
+    double visual_chi2_before = 0.0;
+    double visual_chi2_after = 0.0;
+    double inertial_chi2_before = 0.0;
+    double inertial_chi2_after = 0.0;
+    double active_chi2_before = 0.0;
+    double active_chi2_after = 0.0;
+  };
 
     void static BundleAdjustment(const std::vector<KeyFrame*> &vpKF, const std::vector<MapPoint*> &vpMP,
                                  int nIterations = 5, bool *pbStopFlag=NULL, const unsigned long nLoopKF=0,
@@ -83,7 +97,16 @@ public:
 
     // For inertial systems
 
-    void static LocalInertialBA(KeyFrame* pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges, bool bLarge = false, bool bRecInit = false);
+    void static LocalInertialBA(KeyFrame* pKF,
+                                bool* pbStopFlag,
+                                Map* pMap,
+                                int& num_fixedKF,
+                                int& num_OptKF,
+                                int& num_MPs,
+                                int& num_edges,
+                                bool bLarge = false,
+                                bool bRecInit = false,
+                                LocalInertialBADiagnostic* diagnostic = NULL);
     void static MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbStopFlag, Map *pMap, LoopClosing::KeyFrameAndPose &corrPoses);
 
     // Local BA in welding area when two maps are merged

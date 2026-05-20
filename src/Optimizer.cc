@@ -2412,17 +2412,29 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
     return nIn;
 }
 
-void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges, bool bLarge, bool bRecInit)
+void Optimizer::LocalInertialBA(KeyFrame* pKF,
+                                bool* pbStopFlag,
+                                Map* pMap,
+                                int& num_fixedKF,
+                                int& num_OptKF,
+                                int& num_MPs,
+                                int& num_edges,
+                                bool bLarge,
+                                bool bRecInit,
+                                LocalInertialBADiagnostic* diagnostic)
 {
-    Map* pCurrentMap = pKF->GetMap();
+  if (diagnostic)
+    *diagnostic = LocalInertialBADiagnostic();
 
-    int maxOpt=10;
-    int opt_it=10;
-    if(bLarge)
-    {
-        maxOpt=25;
-        opt_it=4;
-    }
+  Map* pCurrentMap = pKF->GetMap();
+
+  int maxOpt = 10;
+  int opt_it = 10;
+  if (bLarge)
+  {
+    maxOpt = 25;
+    opt_it = 4;
+  }
     const int Nd = std::min((int)pCurrentMap->KeyFramesInMap()-2,maxOpt);
     const unsigned long maxKFid = pKF->mnId;
 
@@ -2694,6 +2706,18 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
             cout << "ERROR building inertial edge" << endl;
     }
 
+    int inertialEdgeCount = 0;
+    int biasRandomWalkEdgeCount = 0;
+    for (size_t i = 0; i < vei.size(); ++i)
+    {
+      if (vei[i])
+        inertialEdgeCount++;
+      if (vegr[i])
+        biasRandomWalkEdgeCount++;
+      if (vear[i])
+        biasRandomWalkEdgeCount++;
+    }
+
     // Set MapPoint vertices
     const int nExpectedSize = (N+lFixedKeyFrames.size())*lLocalMapPoints.size();
 
@@ -2864,6 +2888,12 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     }
 
     //cout << "Total map points: " << lLocalMapPoints.size() << endl;
+    num_fixedKF = lFixedKeyFrames.size();
+    num_OptKF = vpOptimizableKFs.size() + lpOptVisKFs.size();
+    num_MPs = lLocalMapPoints.size();
+    num_edges =
+        vpEdgesMono.size() + vpEdgesStereo.size() + inertialEdgeCount + biasRandomWalkEdgeCount;
+
     for(map<int,int>::iterator mit=mVisEdges.begin(), mend=mVisEdges.end(); mit!=mend; mit++)
     {
         assert(mit->second>=3);
@@ -2872,10 +2902,56 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();
     float err = optimizer.activeRobustChi2();
+    double visualChi2Before = 0.0;
+    double inertialChi2Before = 0.0;
+    for (size_t i = 0, iend = vpEdgesMono.size(); i < iend; i++)
+      visualChi2Before += vpEdgesMono[i]->chi2();
+    for (size_t i = 0, iend = vpEdgesStereo.size(); i < iend; i++)
+      visualChi2Before += vpEdgesStereo[i]->chi2();
+    for (size_t i = 0, iend = vei.size(); i < iend; i++)
+    {
+      if (vei[i])
+        inertialChi2Before += vei[i]->chi2();
+      if (vegr[i])
+        inertialChi2Before += vegr[i]->chi2();
+      if (vear[i])
+        inertialChi2Before += vear[i]->chi2();
+    }
     optimizer.optimize(opt_it); // Originally to 2
+    optimizer.computeActiveErrors();
     float err_end = optimizer.activeRobustChi2();
+    double visualChi2After = 0.0;
+    double inertialChi2After = 0.0;
+    for (size_t i = 0, iend = vpEdgesMono.size(); i < iend; i++)
+      visualChi2After += vpEdgesMono[i]->chi2();
+    for (size_t i = 0, iend = vpEdgesStereo.size(); i < iend; i++)
+      visualChi2After += vpEdgesStereo[i]->chi2();
+    for (size_t i = 0, iend = vei.size(); i < iend; i++)
+    {
+      if (vei[i])
+        inertialChi2After += vei[i]->chi2();
+      if (vegr[i])
+        inertialChi2After += vegr[i]->chi2();
+      if (vear[i])
+        inertialChi2After += vear[i]->chi2();
+    }
     if(pbStopFlag)
         optimizer.setForceStopFlag(pbStopFlag);
+
+    if (diagnostic)
+    {
+      diagnostic->optimized_keyframes = vpOptimizableKFs.size();
+      diagnostic->fixed_keyframes = lFixedKeyFrames.size();
+      diagnostic->visual_edges = vpEdgesMono.size() + vpEdgesStereo.size();
+      diagnostic->inertial_edges = inertialEdgeCount;
+      diagnostic->bias_random_walk_edges = biasRandomWalkEdgeCount;
+      diagnostic->visual_chi2_before = visualChi2Before;
+      diagnostic->visual_chi2_after = visualChi2After;
+      diagnostic->inertial_chi2_before = inertialChi2Before;
+      diagnostic->inertial_chi2_after = inertialChi2After;
+      diagnostic->active_chi2_before = err;
+      diagnostic->active_chi2_after = err_end;
+    }
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
     vToErase.reserve(vpEdgesMono.size()+vpEdgesStereo.size());

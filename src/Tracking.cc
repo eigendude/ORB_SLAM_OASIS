@@ -19,22 +19,24 @@
 
 #include "Tracking.h"
 
-#include "ORBmatcher.h"
-#include "FrameDrawer.h"
 #include "Converter.h"
+#include "FrameDrawer.h"
 #include "G2oTypes.h"
-#include "Optimizer.h"
-#include "Pinhole.h"
+#include "GeometricTools.h"
 #include "KannalaBrandt8.h"
 #include "MLPnPsolver.h"
-#include "GeometricTools.h"
 #include "NumericChecks.h"
+#include "ORBmatcher.h"
+#include "Optimizer.h"
+#include "Pinhole.h"
 
-#include <iostream>
-
-#include <cmath>
-#include <mutex>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <sstream>
 
 
 using namespace std;
@@ -65,6 +67,18 @@ const char* TrackingFailureReasonName(TrackingFailureReason reason)
     }
 
     return "unknown";
+}
+
+double QuantileValue(std::vector<double> values, double quantile)
+{
+  if (values.empty())
+    return -1.0;
+
+  const double clamped_quantile = std::max(0.0, std::min(1.0, quantile));
+  const size_t index =
+      static_cast<size_t>(std::round(clamped_quantile * static_cast<double>(values.size() - 1)));
+  std::nth_element(values.begin(), values.begin() + index, values.end());
+  return values[index];
 }
 } // namespace
 
@@ -185,6 +199,57 @@ double Tracking::GetLastTrackingFailureTimestamp() const
 const char* Tracking::GetLastTrackingFailureReasonName() const
 {
     return TrackingFailureReasonName(GetLastTrackingFailureReason());
+}
+
+InertialStateDiagnostic Tracking::GetInertialStateDiagnostic() const
+{
+  InertialStateDiagnostic diagnostic;
+  diagnostic.visual_only_after_init = mbDiagnosticsVisualOnlyAfterInit;
+  diagnostic.imu_initialized = mpAtlas && mpAtlas->isImuInitialized();
+  diagnostic.tracking_state = mState;
+  diagnostic.inliers = mnMatchesInliers;
+  if (mnDiagnosticsLastOptimizationInliers > 0)
+    diagnostic.inliers = mnDiagnosticsLastOptimizationInliers;
+  diagnostic.local_matches = static_cast<int>(mvpLocalMapPoints.size());
+  diagnostic.map_updated = mbMapUpdated;
+  diagnostic.used_imu_prediction = mbDiagnosticsUsedImuPrediction;
+  diagnostic.used_inertial_optimization = mbDiagnosticsUsedInertialOptimization;
+  diagnostic.valid_last_pose = mbDiagnosticsValidLastPose;
+  diagnostic.valid_visual_prediction = mbDiagnosticsValidVisualPrediction;
+  diagnostic.valid_imu_prediction = mbDiagnosticsValidImuPrediction;
+  diagnostic.valid_optimized_pose = mbDiagnosticsValidOptimizedPose;
+
+  if (mpAtlas && mpAtlas->GetCurrentMap())
+    diagnostic.map_points = static_cast<int>(mpAtlas->GetCurrentMap()->MapPointsInMap());
+
+  if (mpLocalMapper)
+  {
+    diagnostic.scale = mpLocalMapper->mScale;
+    diagnostic.gravity_world = mpLocalMapper->mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+  }
+
+  if (mCurrentFrame.isSet())
+  {
+    diagnostic.valid_pose = true;
+    diagnostic.current_pose = mCurrentFrame.GetPose();
+    diagnostic.velocity = mCurrentFrame.GetVelocity();
+    diagnostic.gyro_bias = Eigen::Vector3f(mCurrentFrame.mImuBias.bwx, mCurrentFrame.mImuBias.bwy,
+                                           mCurrentFrame.mImuBias.bwz);
+    diagnostic.accel_bias = Eigen::Vector3f(mCurrentFrame.mImuBias.bax, mCurrentFrame.mImuBias.bay,
+                                            mCurrentFrame.mImuBias.baz);
+  }
+
+  diagnostic.last_pose = mDiagnosticsLastPose;
+  diagnostic.visual_prediction_pose = mDiagnosticsVisualPredictionPose;
+  diagnostic.imu_prediction_pose = mDiagnosticsImuPredictionPose;
+  diagnostic.optimized_pose = mDiagnosticsOptimizedPose;
+
+  return diagnostic;
+}
+
+void Tracking::SetDiagnosticsVisualOnlyAfterInit(bool enabled)
+{
+  mbDiagnosticsVisualOnlyAfterInit = enabled;
 }
 
 #ifdef REGISTER_TIMES
@@ -1816,6 +1881,8 @@ bool Tracking::PredictStateIMU()
 
         mCurrentFrame.mImuBias = mpLastKeyFrame->GetImuBias();
         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+        mDiagnosticsImuPredictionPose = mCurrentFrame.GetPose();
+        mbDiagnosticsValidImuPrediction = true;
         return true;
     }
     else if(!mbMapUpdated)
@@ -1834,6 +1901,8 @@ bool Tracking::PredictStateIMU()
 
         mCurrentFrame.mImuBias = mLastFrame.mImuBias;
         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+        mDiagnosticsImuPredictionPose = mCurrentFrame.GetPose();
+        mbDiagnosticsValidImuPrediction = true;
         return true;
     }
     else
@@ -1876,6 +1945,29 @@ void Tracking::Track()
     {
         cout << "ERROR: There is not an active map in the atlas" << endl;
     }
+
+    mbDiagnosticsUsedImuPrediction = false;
+    mbDiagnosticsUsedInertialOptimization = false;
+    mbDiagnosticsValidLastPose = mLastFrame.isSet();
+    mbDiagnosticsValidVisualPrediction = false;
+    mbDiagnosticsValidImuPrediction = false;
+    mbDiagnosticsValidOptimizedPose = false;
+    mbDiagnosticsValidPoseBeforeOptimization = false;
+    mnDiagnosticsLastOptimizationInliers = 0;
+    mnDiagnosticsLocalKeyframes = 0;
+    mnDiagnosticsLocalMapPoints = 0;
+    mnDiagnosticsProjectedLocalMapPoints = 0;
+    mnDiagnosticsProjectionMatches = 0;
+    mnDiagnosticsMatchesBeforeOptimization = 0;
+    mnDiagnosticsMatchesAfterOptimization = 0;
+    mnDiagnosticsOutliersAfterOptimization = 0;
+    mnDiagnosticsLocalSearchRadius = 0;
+    mnDiagnosticsReferenceKeyframeId = -1;
+    mnDiagnosticsReferenceKeyframeMatches = 0;
+    mDiagnosticsChi2BeforeOptimization = -1.0;
+    mDiagnosticsChi2AfterOptimization = -1.0;
+    if (mbDiagnosticsValidLastPose)
+      mDiagnosticsLastPose = mLastFrame.GetPose();
 
     if(mState!=NO_IMAGES_YET)
     {
@@ -2814,11 +2906,28 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
-        cout << "TRACK_REF_KF: Less than 15 matches!!\n";
-        RecordTrackingFailure(
-            TrackingFailureReason::ReferenceKeyframeTooFewMatches,
-            mCurrentFrame.mTimeStamp);
-        return false;
+      vector<MapPoint*> vpMapPointMatchesNoOrientation;
+      ORBmatcher matcherNoOrientation(0.7, false);
+      const int nmatchesNoOrientation = matcherNoOrientation.SearchByBoW(
+          mpReferenceKF, mCurrentFrame, vpMapPointMatchesNoOrientation);
+      int refMapPoints = 0;
+      const vector<MapPoint*> vpRefMapPoints = mpReferenceKF->GetMapPointMatches();
+      for (size_t i = 0; i < vpRefMapPoints.size(); i++)
+      {
+        MapPoint* pMP = vpRefMapPoints[i];
+        if (pMP && !pMP->isBad())
+          refMapPoints++;
+      }
+      cout << "Track ref-KF fail: reason=ref_kf" << " frame=" << mCurrentFrame.mnId
+           << " ref_kf=" << mpReferenceKF->mnId << " features=" << mCurrentFrame.N
+           << " ref_features=" << mpReferenceKF->N << " bow=" << nmatches
+           << " bow_no_ori=" << nmatchesNoOrientation << " min=15"
+           << " tracked_ref=" << mpReferenceKF->TrackedMapPoints(1) << " ref_mps=" << refMapPoints
+           << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
+           << " kfs=" << mpAtlas->GetCurrentMap()->KeyFramesInMap() << endl;
+      RecordTrackingFailure(TrackingFailureReason::ReferenceKeyframeTooFewMatches,
+                            mCurrentFrame.mTimeStamp);
+      return false;
     }
 
     mCurrentFrame.mvpMapPoints = vpMapPointMatches;
@@ -2947,13 +3056,20 @@ bool Tracking::TrackWithMotionModel()
 
     if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
     {
-        // Predict state with IMU if it is initialized and it doesnt need reset
-        PredictStateIMU();
-        return true;
+      mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+      mDiagnosticsVisualPredictionPose = mCurrentFrame.GetPose();
+      mbDiagnosticsValidVisualPrediction = true;
+
+      // Predict state with IMU if it is initialized and it doesnt need reset
+      PredictStateIMU();
+      mbDiagnosticsUsedImuPrediction = true;
+      return true;
     }
     else
     {
         mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+        mDiagnosticsVisualPredictionPose = mCurrentFrame.GetPose();
+        mbDiagnosticsValidVisualPrediction = true;
     }
 
 
@@ -3041,6 +3157,15 @@ bool Tracking::TrackLocalMap()
 
     UpdateLocalMap();
     SearchLocalPoints();
+    mnDiagnosticsLocalKeyframes = static_cast<int>(mvpLocalKeyFrames.size());
+    mnDiagnosticsLocalMapPoints = static_cast<int>(mvpLocalMapPoints.size());
+    mnDiagnosticsMatchesBeforeOptimization = CountCurrentFrameMapPointMatches();
+    mDiagnosticsChi2BeforeOptimization = EstimateTrackedMapChi2();
+    if (mCurrentFrame.isSet())
+    {
+      mDiagnosticsPoseBeforeOptimization = mCurrentFrame.GetPose();
+      mbDiagnosticsValidPoseBeforeOptimization = true;
+    }
 
     // TOO check outliers before PO
     int aux1 = 0, aux2=0;
@@ -3054,13 +3179,13 @@ bool Tracking::TrackLocalMap()
 
     int inliers;
     if (!mpAtlas->isImuInitialized())
-        Optimizer::PoseOptimization(&mCurrentFrame);
+      inliers = Optimizer::PoseOptimization(&mCurrentFrame);
     else
     {
         if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
         {
             Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
-            Optimizer::PoseOptimization(&mCurrentFrame);
+            inliers = Optimizer::PoseOptimization(&mCurrentFrame);
         }
         else
         {
@@ -3069,14 +3194,23 @@ bool Tracking::TrackLocalMap()
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
                 inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                mbDiagnosticsUsedInertialOptimization = true;
             }
             else
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
                 inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                mbDiagnosticsUsedInertialOptimization = true;
             }
         }
     }
+    mnDiagnosticsLastOptimizationInliers = inliers;
+    if (mCurrentFrame.isSet())
+    {
+      mDiagnosticsOptimizedPose = mCurrentFrame.GetPose();
+      mbDiagnosticsValidOptimizedPose = true;
+    }
+    mDiagnosticsChi2AfterOptimization = EstimateTrackedMapChi2();
 
     aux1 = 0, aux2 = 0;
     for(int i=0; i<mCurrentFrame.N; i++)
@@ -3086,6 +3220,8 @@ bool Tracking::TrackLocalMap()
             if(mCurrentFrame.mvbOutlier[i])
                 aux2++;
         }
+    mnDiagnosticsMatchesAfterOptimization = aux1;
+    mnDiagnosticsOutliersAfterOptimization = aux2;
 
     mnMatchesInliers = 0;
 
@@ -3114,7 +3250,10 @@ bool Tracking::TrackLocalMap()
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
-        return false;
+    {
+      LogTrackLocalMapFailure("recent_reloc_min", 50);
+      return false;
+    }
 
     if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
         return true;
@@ -3124,7 +3263,13 @@ bool Tracking::TrackLocalMap()
     {
         if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
         {
-            return false;
+          const int minInliers = mpAtlas->isImuInitialized() ? 15 : 50;
+          const char* reason =
+              (mnDiagnosticsProjectedLocalMapPoints < minInliers)     ? "low_projection"
+              : (mnDiagnosticsMatchesBeforeOptimization < minInliers) ? "low_matches"
+                                                                      : "pose_opt_reject";
+          LogTrackLocalMapFailure(reason, minInliers);
+          return false;
         }
         else
             return true;
@@ -3133,7 +3278,8 @@ bool Tracking::TrackLocalMap()
     {
         if(mnMatchesInliers<15)
         {
-            return false;
+          LogTrackLocalMapFailure("not_enough_matches", 15);
+          return false;
         }
         else
             return true;
@@ -3141,10 +3287,274 @@ bool Tracking::TrackLocalMap()
     else
     {
         if(mnMatchesInliers<30)
-            return false;
+        {
+          LogTrackLocalMapFailure("not_enough_matches", 30);
+          return false;
+        }
         else
             return true;
     }
+}
+
+int Tracking::CountCurrentFrameMapPointMatches(int* outliers) const
+{
+  int matches = 0;
+  int outlierCount = 0;
+  for (int i = 0; i < mCurrentFrame.N; ++i)
+  {
+    if (!mCurrentFrame.mvpMapPoints[i])
+      continue;
+
+    ++matches;
+    if (mCurrentFrame.mvbOutlier[i])
+      ++outlierCount;
+  }
+
+  if (outliers)
+    *outliers = outlierCount;
+
+  return matches;
+}
+
+double Tracking::EstimateTrackedMapChi2() const
+{
+  if (!mCurrentFrame.isSet() || !mCurrentFrame.mpCamera)
+    return -1.0;
+
+  double chi2 = 0.0;
+  int residuals = 0;
+  const Sophus::SE3f Tcw = mCurrentFrame.GetPose();
+  const int nLeft = (mCurrentFrame.Nleft != -1) ? std::min(mCurrentFrame.Nleft, mCurrentFrame.N)
+                                                : mCurrentFrame.N;
+
+  for (int i = 0; i < nLeft; ++i)
+  {
+    if (i >= static_cast<int>(mCurrentFrame.mvKeysUn.size()))
+      continue;
+
+    MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+    if (!pMP || pMP->isBad())
+      continue;
+
+    const Eigen::Vector3f Pc = Tcw * pMP->GetWorldPos();
+    if (Pc(2) <= 0.0f)
+      continue;
+
+    const Eigen::Vector2f uv = mCurrentFrame.mpCamera->project(Pc);
+    if (!std::isfinite(uv(0)) || !std::isfinite(uv(1)))
+      continue;
+
+    const cv::KeyPoint& keypoint = mCurrentFrame.mvKeysUn[i];
+    const float dx = keypoint.pt.x - uv(0);
+    const float dy = keypoint.pt.y - uv(1);
+    const int octave = keypoint.octave;
+    const float invSigma2 =
+        (octave >= 0 && octave < static_cast<int>(mCurrentFrame.mvInvLevelSigma2.size()))
+            ? mCurrentFrame.mvInvLevelSigma2[octave]
+            : 1.0f;
+
+    chi2 += static_cast<double>((dx * dx + dy * dy) * invSigma2);
+    ++residuals;
+  }
+
+  if (residuals == 0)
+    return -1.0;
+
+  return chi2 / static_cast<double>(residuals);
+}
+
+std::string Tracking::BuildMapPointQualitySummary() const
+{
+  std::vector<double> errBefore;
+  std::vector<double> errAfter;
+  std::vector<double> depths;
+  std::vector<double> viewAngles;
+  int negBefore = 0;
+  int negAfter = 0;
+  int nearDepth = 0;
+  int farDepth = 0;
+  int obsLe2 = 0;
+  int obsLe3 = 0;
+  int obsGt3 = 0;
+  int createdBeforeImu = 0;
+  int createdAfterImu = 0;
+  int recentPoints = 0;
+  int total = 0;
+
+  if (!mCurrentFrame.mpCamera)
+    return "MI mp_quality: unavailable=no_camera";
+
+  const bool haveBeforePose = mbDiagnosticsValidPoseBeforeOptimization;
+  const Sophus::SE3f beforePose = mDiagnosticsPoseBeforeOptimization;
+  const Sophus::SE3f afterPose = mCurrentFrame.GetPose();
+  const int nLeft = (mCurrentFrame.Nleft != -1) ? std::min(mCurrentFrame.Nleft, mCurrentFrame.N)
+                                                : mCurrentFrame.N;
+  const KeyFrame* contextKF =
+      mCurrentFrame.mpReferenceKF ? mCurrentFrame.mpReferenceKF : mpLastKeyFrame;
+  const unsigned long currentKfId = contextKF ? contextKF->mnId : 0;
+  const unsigned long imuInitKfId = mpLocalMapper ? mpLocalMapper->mInitialImuKeyframeId : 0;
+
+  for (int i = 0; i < nLeft; ++i)
+  {
+    if (i >= static_cast<int>(mCurrentFrame.mvKeysUn.size()))
+      continue;
+
+    MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+    if (!pMP || pMP->isBad())
+      continue;
+
+    const Eigen::Vector3f worldPoint = pMP->GetWorldPos();
+    const Eigen::Vector3f pcAfter = afterPose * worldPoint;
+    if (pcAfter(2) <= 0.0f)
+    {
+      negAfter++;
+      continue;
+    }
+
+    total++;
+    depths.push_back(pcAfter(2));
+    if (pcAfter(2) < 0.2f)
+      nearDepth++;
+    if (pcAfter(2) > 20.0f)
+      farDepth++;
+
+    const Eigen::Vector2f uvAfter = mCurrentFrame.mpCamera->project(pcAfter);
+    if (std::isfinite(uvAfter(0)) && std::isfinite(uvAfter(1)))
+    {
+      const cv::KeyPoint& keypoint = mCurrentFrame.mvKeysUn[i];
+      const double dxAfter = static_cast<double>(keypoint.pt.x - uvAfter(0));
+      const double dyAfter = static_cast<double>(keypoint.pt.y - uvAfter(1));
+      errAfter.push_back(std::sqrt(dxAfter * dxAfter + dyAfter * dyAfter));
+
+      if (haveBeforePose)
+      {
+        const Eigen::Vector3f pcBefore = beforePose * worldPoint;
+        if (pcBefore(2) <= 0.0f)
+        {
+          negBefore++;
+        }
+        else
+        {
+          const Eigen::Vector2f uvBefore = mCurrentFrame.mpCamera->project(pcBefore);
+          if (std::isfinite(uvBefore(0)) && std::isfinite(uvBefore(1)))
+          {
+            const double dxBefore = static_cast<double>(keypoint.pt.x - uvBefore(0));
+            const double dyBefore = static_cast<double>(keypoint.pt.y - uvBefore(1));
+            errBefore.push_back(std::sqrt(dxBefore * dxBefore + dyBefore * dyBefore));
+          }
+        }
+      }
+    }
+
+    if (pMP->mTrackViewCos >= -1.0f && pMP->mTrackViewCos <= 1.0f)
+      viewAngles.push_back(std::acos(pMP->mTrackViewCos) * 180.0 / M_PI);
+
+    const int observations = pMP->Observations();
+    if (observations <= 2)
+      obsLe2++;
+    else if (observations <= 3)
+      obsLe3++;
+    else
+      obsGt3++;
+
+    if (imuInitKfId > 0)
+    {
+      if (static_cast<unsigned long>(std::max<long>(0, pMP->mnFirstKFid)) <= imuInitKfId)
+        createdBeforeImu++;
+      else
+        createdAfterImu++;
+    }
+
+    if (pMP->mnFirstKFid >= 0 && currentKfId >= static_cast<unsigned long>(pMP->mnFirstKFid) &&
+        currentKfId - static_cast<unsigned long>(pMP->mnFirstKFid) <= 3)
+    {
+      recentPoints++;
+    }
+  }
+
+  std::ostringstream stream;
+  stream << std::fixed << std::setprecision(2) << "MI mp_quality: n=" << total
+         << " err_pre=" << QuantileValue(errBefore, 0.5) << "/" << QuantileValue(errBefore, 0.9)
+         << " err_post=" << QuantileValue(errAfter, 0.5) << "/" << QuantileValue(errAfter, 0.9)
+         << " depth=" << QuantileValue(depths, 0.5) << "/" << QuantileValue(depths, 0.9)
+         << " neg=" << negBefore << "/" << negAfter << " near_far=" << nearDepth << "/" << farDepth
+         << " view=" << QuantileValue(viewAngles, 0.5) << "/" << QuantileValue(viewAngles, 0.9)
+         << " obs<=2/<=3/>3=" << obsLe2 << "/" << obsLe3 << "/" << obsGt3
+         << " pre_post_imu=" << createdBeforeImu << "/" << createdAfterImu
+         << " recent=" << recentPoints;
+  return stream.str();
+}
+
+void Tracking::LogTrackLocalMapFailure(const char* reason, int minInliers) const
+{
+  const double baNorm = std::sqrt(mCurrentFrame.mImuBias.bax * mCurrentFrame.mImuBias.bax +
+                                  mCurrentFrame.mImuBias.bay * mCurrentFrame.mImuBias.bay +
+                                  mCurrentFrame.mImuBias.baz * mCurrentFrame.mImuBias.baz);
+  const double bgNorm = std::sqrt(mCurrentFrame.mImuBias.bwx * mCurrentFrame.mImuBias.bwx +
+                                  mCurrentFrame.mImuBias.bwy * mCurrentFrame.mImuBias.bwy +
+                                  mCurrentFrame.mImuBias.bwz * mCurrentFrame.mImuBias.bwz);
+  const double velocityNorm =
+      mCurrentFrame.HasVelocity() ? mCurrentFrame.GetVelocity().norm() : -1.0;
+  const double scale = mpLocalMapper ? mpLocalMapper->mScale : -1.0;
+  const char* prediction = "unknown";
+  if (mbDiagnosticsUsedImuPrediction && mbDiagnosticsValidImuPrediction)
+    prediction = "imu";
+  else if (mbDiagnosticsValidVisualPrediction)
+    prediction = "motion";
+  else if (mbDiagnosticsValidLastPose)
+    prediction = "last";
+
+  double predYaw = 0.0;
+  double estYaw = 0.0;
+  double rpErr = -1.0;
+  double dTrans = -1.0;
+  if (mbDiagnosticsValidLastPose && mCurrentFrame.isSet())
+  {
+    Sophus::SE3f predPose;
+    bool validPredictionPose = false;
+    if (mbDiagnosticsUsedImuPrediction && mbDiagnosticsValidImuPrediction)
+    {
+      predPose = mDiagnosticsImuPredictionPose;
+      validPredictionPose = true;
+    }
+    else if (mbDiagnosticsValidVisualPrediction)
+    {
+      predPose = mDiagnosticsVisualPredictionPose;
+      validPredictionPose = true;
+    }
+
+    const Sophus::SE3f estDelta = mCurrentFrame.GetPose() * mDiagnosticsLastPose.inverse();
+    const Eigen::Vector3f estYpr = estDelta.rotationMatrix().eulerAngles(2, 1, 0);
+    estYaw = estYpr(0) * 180.0 / M_PI;
+    dTrans = estDelta.translation().norm();
+
+    if (validPredictionPose)
+    {
+      const Sophus::SE3f predDelta = predPose * mDiagnosticsLastPose.inverse();
+      const Eigen::Vector3f predYpr = predDelta.rotationMatrix().eulerAngles(2, 1, 0);
+      predYaw = predYpr(0) * 180.0 / M_PI;
+      const Eigen::Vector2f rpDelta = estYpr.tail<2>() - predYpr.tail<2>();
+      rpErr = rpDelta.norm() * 180.0 / M_PI;
+    }
+  }
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3) << "MI track_fail: reason=" << reason
+      << " state=" << static_cast<int>(mState) << " lkf=" << mnDiagnosticsLocalKeyframes
+      << " lmp=" << mnDiagnosticsLocalMapPoints << " proj=" << mnDiagnosticsProjectedLocalMapPoints
+      << " pm=" << mnDiagnosticsProjectionMatches
+      << " raw=" << mnDiagnosticsMatchesBeforeOptimization
+      << " opt=" << mnDiagnosticsMatchesAfterOptimization << " inl=" << mnMatchesInliers << "/"
+      << minInliers << " out=" << mnDiagnosticsOutliersAfterOptimization
+      << " chi2=" << mDiagnosticsChi2BeforeOptimization << "->" << mDiagnosticsChi2AfterOptimization
+      << " th=" << mnDiagnosticsLocalSearchRadius << " ref=" << mnDiagnosticsReferenceKeyframeId
+      << ":" << mnDiagnosticsReferenceKeyframeMatches << " pred=" << prediction
+      << " yaw_pred_1f=" << predYaw << " yaw_est_1f=" << estYaw << " rp_err=" << rpErr
+      << " dtrans=" << dTrans << " vel=" << velocityNorm << " ba=" << baNorm << " bg=" << bgNorm
+      << " s=" << scale;
+  std::cout << oss.str() << std::endl;
+  if (std::string(reason) == "pose_opt_reject")
+    std::cout << BuildMapPointQualitySummary() << std::endl;
 }
 
 bool Tracking::NeedNewKeyFrame()
@@ -3496,7 +3906,12 @@ void Tracking::SearchLocalPoints()
         if(mState==LOST || mState==RECENTLY_LOST) // Lost for less than 1 second
             th=15; // 15
 
-        int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
+        mnDiagnosticsProjectedLocalMapPoints = nToMatch;
+        mnDiagnosticsLocalSearchRadius = th;
+        const int matches =
+            matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th,
+                                       mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
+        mnDiagnosticsProjectionMatches = matches;
     }
 }
 
@@ -3689,6 +4104,8 @@ void Tracking::UpdateLocalKeyFrames()
     {
         mpReferenceKF = pKFmax;
         mCurrentFrame.mpReferenceKF = mpReferenceKF;
+        mnDiagnosticsReferenceKeyframeId = pKFmax->mnId;
+        mnDiagnosticsReferenceKeyframeMatches = max;
     }
 }
 

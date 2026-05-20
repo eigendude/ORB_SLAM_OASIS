@@ -1400,6 +1400,22 @@ const char* System::GetLastTrackingFailureReasonName() const
     return mpTracker->GetLastTrackingFailureReasonName();
 }
 
+InertialStateDiagnostic System::GetInertialStateDiagnostic() const
+{
+  if (mpTracker == NULL)
+    return InertialStateDiagnostic();
+
+  return mpTracker->GetInertialStateDiagnostic();
+}
+
+void System::SetDiagnosticsVisualOnlyAfterInit(bool enabled)
+{
+  if (mpTracker == NULL)
+    return;
+
+  mpTracker->SetDiagnosticsVisualOnlyAfterInit(enabled);
+}
+
 double System::GetTimeFromIMUInit()
 {
     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;

@@ -21,16 +21,47 @@
 #define SYSTEM_H
 
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <thread>
+
+#include <Eigen/Core>
+#include <opencv2/opencv.hpp>
+#include <sophus/se3.hpp>
 #include <unistd.h>
-#include<stdio.h>
-#include<stdlib.h>
-#include<string>
-#include<thread>
-#include<opencv2/opencv.hpp>
 
 namespace ORB_SLAM3
 {
 enum class TrackingFailureReason;
+
+struct InertialStateDiagnostic
+{
+  bool visual_only_after_init = false;
+  bool imu_initialized = false;
+  bool valid_pose = false;
+  bool valid_last_pose = false;
+  bool valid_visual_prediction = false;
+  bool valid_imu_prediction = false;
+  bool valid_optimized_pose = false;
+  bool used_imu_prediction = false;
+  bool used_inertial_optimization = false;
+  bool map_updated = false;
+  int tracking_state = 0;
+  int inliers = 0;
+  int local_matches = 0;
+  int map_points = 0;
+  double scale = 1.0;
+  Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
+  Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
+  Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();
+  Eigen::Vector3f accel_bias = Eigen::Vector3f::Zero();
+  Sophus::SE3f last_pose;
+  Sophus::SE3f visual_prediction_pose;
+  Sophus::SE3f imu_prediction_pose;
+  Sophus::SE3f optimized_pose;
+  Sophus::SE3f current_pose;
+};
 }
 
 #include "Tracking.h"
@@ -190,6 +221,8 @@ public:
     TrackingFailureReason GetLastTrackingFailureReason() const;
     double GetLastTrackingFailureTimestamp() const;
     const char* GetLastTrackingFailureReasonName() const;
+    InertialStateDiagnostic GetInertialStateDiagnostic() const;
+    void SetDiagnosticsVisualOnlyAfterInit(bool enabled);
 
     // For debugging
     double GetTimeFromIMUInit();
