@@ -2940,10 +2940,9 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     const double dr = (TcwAfter.so3() * TcwBefore.so3().inverse()).log().norm() * 180.0 / M_PI;
     const bool inertialWorse =
         inertialChiBefore > 0.0 && inertialChiAfter > 1.25 * inertialChiBefore;
-    const bool visualHugeWhileInertialImproves =
-        err_end > 1000.0f && inertialChiBefore > 0.0 && inertialChiAfter < inertialChiBefore;
-    if (dba > 0.05 || ba > 0.25 || dbg > 0.005 || dpos > 0.10 || dr > 2.0 || inertialWorse ||
-        visualHugeWhileInertialImproves)
+    const bool visualWorse = err > 0.0f && err_end > 1.25f * err;
+    if (ba > 0.25 || dba > 0.05 || bg > 0.02 || dbg > 0.005 || dpos > 0.10 || dr > 2.0 ||
+        inertialWorse || visualWorse)
     {
       const unsigned long sinceInit =
           pKF->mnId >= pCurrentMap->GetInitKFid() ? pKF->mnId - pCurrentMap->GetInitKFid() : 0;
