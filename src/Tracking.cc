@@ -3110,7 +3110,7 @@ bool Tracking::TrackLocalMap()
                 aux2++;
         }
 
-    int inliers;
+    int optimizerInliers = -1;
     if (!mpAtlas->isImuInitialized())
         Optimizer::PoseOptimization(&mCurrentFrame);
     else
@@ -3126,16 +3126,19 @@ bool Tracking::TrackLocalMap()
             if(!mbMapUpdated) //  && (mnMatchesInliers>30))
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                optimizerInliers = Optimizer::PoseInertialOptimizationLastFrame(
+                    &mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
             else
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                optimizerInliers = Optimizer::PoseInertialOptimizationLastKeyFrame(
+                    &mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
         }
     }
 
+    const int rawTrackedBeforeOutlierCull = aux1;
     aux1 = 0, aux2 = 0;
     for(int i=0; i<mCurrentFrame.N; i++)
         if( mCurrentFrame.mvpMapPoints[i])
@@ -3171,8 +3174,50 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
+
+    const auto logTrackFail = [&](const char* reason, int minInliers)
+    {
+      static string lastReason;
+      static int lastState = -1;
+      static unsigned long lastFrame = 0;
+
+      const bool nearInit =
+          mpAtlas->isImuInitialized() && !mpAtlas->GetCurrentMap()->GetIniertialBA2();
+      const bool shouldLog = lastReason != reason || lastState != mState ||
+                             mCurrentFrame.mnId < lastFrame ||
+                             mCurrentFrame.mnId - lastFrame > 30 || nearInit;
+      if (!shouldLog)
+        return;
+
+      lastReason = reason;
+      lastState = mState;
+      lastFrame = mCurrentFrame.mnId;
+
+      const IMU::Bias& bias = mCurrentFrame.mImuBias;
+      const Eigen::Vector3f ba(bias.bax, bias.bay, bias.baz);
+      const Eigen::Vector3f bg(bias.bwx, bias.bwy, bias.bwz);
+      const float dtrans =
+          (mCurrentFrame.isSet() && mLastFrame.isSet())
+              ? (mCurrentFrame.GetCameraCenter() - mLastFrame.GetCameraCenter()).norm()
+              : 0.0f;
+      const float vel = mpAtlas->isImuInitialized() ? mCurrentFrame.GetVelocity().norm() : 0.0f;
+      const char* pred = mpAtlas->isImuInitialized() ? (mbMapUpdated ? "last" : "imu") : "motion";
+
+      cout << "MI track_fail: reason=" << reason << " state=" << mState
+           << " lkf=" << mvpLocalKeyFrames.size() << " lmp=" << mvpLocalMapPoints.size()
+           << " proj=" << aux1 << " raw=" << rawTrackedBeforeOutlierCull
+           << " inl=" << mnMatchesInliers << "/" << minInliers << " chi2=na" << " pred=" << pred
+           << " yaw_pred_1f=0 yaw_est_1f=0" << " dtrans=" << dtrans << " vel=" << vel
+           << " ba=" << ba.norm() << " bg=" << bg.norm()
+           << " scale=" << (mpLocalMapper ? mpLocalMapper->mScale : 1.0) << endl;
+      (void)optimizerInliers;
+    };
+
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
-        return false;
+    {
+      logTrackFail("reloc_recent", 50);
+      return false;
+    }
 
     if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
         return true;
@@ -3182,7 +3227,8 @@ bool Tracking::TrackLocalMap()
     {
         if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
         {
-            return false;
+          logTrackFail("imu_mono_inliers", mpAtlas->isImuInitialized() ? 15 : 50);
+          return false;
         }
         else
             return true;
@@ -3191,7 +3237,8 @@ bool Tracking::TrackLocalMap()
     {
         if(mnMatchesInliers<15)
         {
-            return false;
+          logTrackFail("imu_stereo_inliers", 15);
+          return false;
         }
         else
             return true;
@@ -3199,7 +3246,10 @@ bool Tracking::TrackLocalMap()
     else
     {
         if(mnMatchesInliers<30)
-            return false;
+        {
+          logTrackFail("mono_inliers", 30);
+          return false;
+        }
         else
             return true;
     }

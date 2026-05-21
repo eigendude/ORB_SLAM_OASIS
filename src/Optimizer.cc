@@ -2415,6 +2415,12 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
 void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges, bool bLarge, bool bRecInit)
 {
     Map* pCurrentMap = pKF->GetMap();
+    const Sophus::SE3f TcwBefore = pKF->GetPose();
+    const Eigen::Vector3f cameraCenterBefore = pKF->GetCameraCenter();
+    const Eigen::Vector3f velocityBefore = pKF->GetVelocity();
+    const IMU::Bias biasBefore = pKF->GetImuBias();
+    const Eigen::Vector3f baBefore(biasBefore.bax, biasBefore.bay, biasBefore.baz);
+    const Eigen::Vector3f bgBefore(biasBefore.bwx, biasBefore.bwy, biasBefore.bwz);
 
     int maxOpt=10;
     int opt_it=10;
@@ -2872,8 +2878,84 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     optimizer.initializeOptimization();
     optimizer.computeActiveErrors();
     float err = optimizer.activeRobustChi2();
+    double inertialChiBefore = 0.0;
+    int inertialEdges = 0;
+    for (size_t i = 0, iend = vei.size(); i < iend; i++)
+    {
+      if (!vei[i])
+        continue;
+      inertialChiBefore += vei[i]->chi2();
+      inertialEdges++;
+    }
     optimizer.optimize(opt_it); // Originally to 2
+    optimizer.computeActiveErrors();
     float err_end = optimizer.activeRobustChi2();
+    double inertialChiAfter = 0.0;
+    for (size_t i = 0, iend = vei.size(); i < iend; i++)
+    {
+      if (!vei[i])
+        continue;
+      inertialChiAfter += vei[i]->chi2();
+    }
+
+    Sophus::SE3f TcwAfter = TcwBefore;
+    Eigen::Vector3f velocityAfter = velocityBefore;
+    Eigen::Vector3f baAfter = baBefore;
+    Eigen::Vector3f bgAfter = bgBefore;
+    if (optimizer.vertex(pKF->mnId))
+    {
+      VertexPose* VP = static_cast<VertexPose*>(optimizer.vertex(pKF->mnId));
+      TcwAfter =
+          Sophus::SE3f(VP->estimate().Rcw[0].cast<float>(), VP->estimate().tcw[0].cast<float>());
+    }
+    if (pKF->bImu)
+    {
+      if (optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 1))
+      {
+        VertexVelocity* VV =
+            static_cast<VertexVelocity*>(optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 1));
+        velocityAfter = VV->estimate().cast<float>();
+      }
+      if (optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 2))
+      {
+        VertexGyroBias* VG =
+            static_cast<VertexGyroBias*>(optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 2));
+        bgAfter = VG->estimate().cast<float>();
+      }
+      if (optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 3))
+      {
+        VertexAccBias* VA =
+            static_cast<VertexAccBias*>(optimizer.vertex(maxKFid + 3 * (pKF->mnId) + 3));
+        baAfter = VA->estimate().cast<float>();
+      }
+    }
+
+    const Eigen::Vector3f cameraCenterAfter = TcwAfter.inverse().translation();
+    const double dba = (baAfter - baBefore).norm();
+    const double ba = baAfter.norm();
+    const double dbg = (bgAfter - bgBefore).norm();
+    const double bg = bgAfter.norm();
+    const double vel = velocityAfter.norm();
+    const double dpos = (cameraCenterAfter - cameraCenterBefore).norm();
+    const double dr = (TcwAfter.so3() * TcwBefore.so3().inverse()).log().norm() * 180.0 / M_PI;
+    const bool inertialWorse =
+        inertialChiBefore > 0.0 && inertialChiAfter > 1.25 * inertialChiBefore;
+    const bool visualHugeWhileInertialImproves =
+        err_end > 1000.0f && inertialChiBefore > 0.0 && inertialChiAfter < inertialChiBefore;
+    if (dba > 0.05 || ba > 0.25 || dbg > 0.005 || dpos > 0.10 || dr > 2.0 || inertialWorse ||
+        visualHugeWhileInertialImproves)
+    {
+      const unsigned long sinceInit =
+          pKF->mnId >= pCurrentMap->GetInitKFid() ? pKF->mnId - pCurrentMap->GetInitKFid() : 0;
+      cout << "MI iba_jump: source=local_inertial_ba" << " since_init=" << sinceInit
+           << " since_viba=" << sinceInit
+           << " kfs=" << (vpOptimizableKFs.size() + lpOptVisKFs.size()) << "/"
+           << lFixedKeyFrames.size() << " edges=" << (vpEdgesMono.size() + vpEdgesStereo.size())
+           << "/" << inertialEdges << " chi_v=" << err << "->" << err_end
+           << " chi_i=" << inertialChiBefore << "->" << inertialChiAfter << " ba=" << ba
+           << " dba=" << dba << " bg=" << bg << " dbg=" << dbg << " vel=" << vel << " dpos=" << dpos
+           << " dr=" << dr << " scale=1" << endl;
+    }
     if(pbStopFlag)
         optimizer.setForceStopFlag(pbStopFlag);
 

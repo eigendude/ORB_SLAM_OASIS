@@ -43,6 +43,59 @@ float ComputeRecentInitMotionDistance(KeyFrame* pKF)
   return (pKF->mPrevKF->GetCameraCenter() - pKF->GetCameraCenter()).norm() +
          (pKF->mPrevKF->mPrevKF->GetCameraCenter() - pKF->mPrevKF->GetCameraCenter()).norm();
 }
+
+const char* DominantAxisName(const Eigen::Vector3f& v)
+{
+  int axis = 0;
+  float maxAbs = std::fabs(v.x());
+  if (std::fabs(v.y()) > maxAbs)
+  {
+    axis = 1;
+    maxAbs = std::fabs(v.y());
+  }
+  if (std::fabs(v.z()) > maxAbs)
+    axis = 2;
+
+  if (axis == 0)
+    return v.x() >= 0.0f ? "+X" : "-X";
+  if (axis == 1)
+    return v.y() >= 0.0f ? "+Y" : "-Y";
+  return v.z() >= 0.0f ? "+Z" : "-Z";
+}
+
+void LogGravityCheck(
+    const char* event, KeyFrame* pKF, const Eigen::Matrix3d& Rwg, double scale, double dRDeg)
+{
+  if (pKF == NULL)
+    return;
+
+  const Eigen::Vector3f gravityWorld = Rwg.cast<float>() * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+  const Eigen::Vector3f gravityCamera = pKF->GetPose().rotationMatrix() * gravityWorld;
+  const Eigen::Vector3f gravityBody = pKF->mImuCalib.mTbc.rotationMatrix() * gravityCamera;
+  const Eigen::Vector3f specificForceBody = -gravityBody;
+  const float dotNegZ = gravityBody.normalized().dot(-Eigen::Vector3f::UnitZ());
+  const bool ok = dotNegZ > 0.85f;
+
+  cout << "MI gravity_check: event=" << event << " scale=" << scale << " dR_deg=" << dRDeg
+       << " gravity_camera_axis=" << DominantAxisName(gravityCamera)
+       << " gravity_body_axis=" << DominantAxisName(gravityBody)
+       << " specific_force_body_axis=" << DominantAxisName(specificForceBody)
+       << " gravity_body_dot_neg_z=" << dotNegZ << " ok=" << (ok ? 1 : 0) << endl;
+  if (!ok)
+  {
+    const Eigen::Vector3f TbcX = pKF->mImuCalib.mTbc.rotationMatrix().col(0);
+    const Eigen::Vector3f TbcY = pKF->mImuCalib.mTbc.rotationMatrix().col(1);
+    const Eigen::Vector3f TbcZ = pKF->mImuCalib.mTbc.rotationMatrix().col(2);
+    const Eigen::Vector3f TcbX = pKF->mImuCalib.mTcb.rotationMatrix().col(0);
+    const Eigen::Vector3f TcbY = pKF->mImuCalib.mTcb.rotationMatrix().col(1);
+    const Eigen::Vector3f TcbZ = pKF->mImuCalib.mTcb.rotationMatrix().col(2);
+    cout << "MI gravity_check_warn: event=" << event << " Tbc_x=" << DominantAxisName(TbcX)
+         << " Tbc_y=" << DominantAxisName(TbcY) << " Tbc_z=" << DominantAxisName(TbcZ)
+         << " Tcb_x=" << DominantAxisName(TcbX) << " Tcb_y=" << DominantAxisName(TcbY)
+         << " Tcb_z=" << DominantAxisName(TcbZ) << " old_epoch_body_gravity=na"
+         << " sign_flip_body_axis=" << DominantAxisName(-gravityBody) << endl;
+  }
+}
 } // namespace
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
@@ -189,9 +242,9 @@ void LocalMapping::Run()
                         if ((mTinit < 10.f) && (dist >= 0.0f) && (dist < 0.02))
                         {
                           mLastInitAnomalyReason = "not_enough_motion";
-                          cout << "MI init_rejected: reason=not_enough_motion"
+                          cout << "MI init_rejected: reason=not_enough_motion pre_align=0"
                                << " mTinit=" << mTinit << " visual_dist=" << dist
-                               << " dist=" << dist << " scale=" << mScale
+                               << " scaled_dist=" << dist << " scale=" << mScale
                                << " kfs=" << mpAtlas->KeyFramesInMap()
                                << " map=" << mpAtlas->MapPointsInMap()
                                << " inliers=" << mpTracker->GetMatchesInliers() << endl;
@@ -1311,8 +1364,6 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
       mWorstInitInertialChiRatio = -1.0;
     }
 
-    bInitializing = true;
-
     while(CheckNewKeyFrames())
     {
         ProcessNewKeyFrame();
@@ -1376,50 +1427,68 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
       mMaxInitVelocityNorm =
           std::max(mMaxInitVelocityNorm, static_cast<double>((*itKF)->GetVelocity().norm()));
 
-    if (mScale<1e-1)
+    const float visual_dist = ComputeRecentInitMotionDistance(mpCurrentKeyFrame);
+    const float dist = visual_dist >= 0.0f ? visual_dist * static_cast<float>(mScale) : visual_dist;
+    const int init_inliers = mpTracker ? mpTracker->GetMatchesInliers() : 0;
+    const size_t init_map_points = mpAtlas->GetCurrentMap()->MapPointsInMap();
+
+    // Meters of scaled recent camera translation required before IMU init
+    const float min_canonical_motion = 0.02f;
+    const bool bad_scale = mScale < 1e-1;
+    const bool not_enough_motion =
+        !map_was_imu_initialized && !mpCurrentKeyFrame->GetMap()->GetIniertialBA2() &&
+        (mTinit < 10.f) && (dist >= 0.0f) && (dist < min_canonical_motion);
+    const char* pre_align_reject =
+        bad_scale ? "bad_scale" : (not_enough_motion ? "not_enough_motion" : "none");
+
+    if (!map_was_imu_initialized)
     {
-        cout << "scale too small" << endl;
-        bInitializing=false;
-        return;
+      cout << "MI init_check: attempt=" << mInertialInitAttemptId << " phase=pre_align"
+           << " mTinit=" << mTinit << " kfs=" << N << " map=" << init_map_points
+           << " inliers=" << init_inliers << " visual_dist=" << visual_dist
+           << " scaled_dist=" << dist << " scale=" << mScale << " gyro_bias_norm=" << mbg.norm()
+           << " accel_bias_norm=" << mba.norm()
+           << " will_align=" << ((bad_scale || not_enough_motion) ? 0 : 1)
+           << " reject=" << pre_align_reject << endl;
+    }
+
+    if (bad_scale)
+    {
+      if (!map_was_imu_initialized)
+      {
+        mLastInitAnomalyReason = "bad_scale";
+        cout << "MI init_rejected: reason=bad_scale pre_align=1" << " mTinit=" << mTinit
+             << " visual_dist=" << visual_dist << " scaled_dist=" << dist << " scale=" << mScale
+             << " kfs=" << N << " map=" << init_map_points << " inliers=" << init_inliers << endl;
+      }
+      cout << "scale too small" << endl;
+      return;
     }
 
     if (!map_was_imu_initialized)
     {
-      const float visual_dist = ComputeRecentInitMotionDistance(mpCurrentKeyFrame);
-      const float dist =
-          visual_dist >= 0.0f ? visual_dist * static_cast<float>(mScale) : visual_dist;
-
-      // Meters of scaled recent camera translation required before IMU init
-      const float min_canonical_motion = 0.02f;
-
-      const bool not_enough_motion = !mpCurrentKeyFrame->GetMap()->GetIniertialBA2() &&
-                                     (mTinit < 10.f) && (dist >= 0.0f) &&
-                                     (dist < min_canonical_motion);
-      cout << "MI init_lifecycle: attempt=" << mInertialInitAttemptId
-           << " phase=pre_align_motion_check mutation_started=0" << " mTinit=" << mTinit
-           << " visual_dist=" << visual_dist << " dist=" << dist << " scale=" << mScale
-           << " kfs=" << N << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
-           << " inliers=" << (mpTracker ? mpTracker->GetMatchesInliers() : 0)
-           << " will_align=" << (not_enough_motion ? 0 : 1)
-           << " reason=" << (not_enough_motion ? "not_enough_motion" : "ok") << endl;
       if (not_enough_motion)
       {
         mLastInitAnomalyReason = "not_enough_motion";
-        cout << "MI init_rejected: reason=not_enough_motion" << " mTinit=" << mTinit
-             << " visual_dist=" << visual_dist << " dist=" << dist << " scale=" << mScale
-             << " kfs=" << N << " map=" << mpAtlas->GetCurrentMap()->MapPointsInMap()
-             << " inliers=" << (mpTracker ? mpTracker->GetMatchesInliers() : 0) << " pre_align=1"
-             << endl;
+        cout << "MI init_rejected: reason=not_enough_motion pre_align=1" << " mTinit=" << mTinit
+             << " visual_dist=" << visual_dist << " scaled_dist=" << dist << " scale=" << mScale
+             << " kfs=" << N << " map=" << init_map_points << " inliers=" << init_inliers << endl;
         if (mpTracker)
         {
           mpTracker->RecordTrackingFailure(
               TrackingFailureReason::NotEnoughMotionForImuInitialization,
               mpCurrentKeyFrame->mTimeStamp);
         }
-        bInitializing = false;
         return;
       }
     }
+
+    bInitializing = true;
+
+    const char* alignment_event =
+        map_was_imu_initialized ? (priorA != 0.f ? "viba_1" : "viba_2") : "init_accepted";
+    const double alignment_rotation_deg =
+        Sophus::SO3f(mRwg.cast<float>().transpose()).log().norm() * 180.0 / M_PI;
 
     // Before this line we are not changing the map
     {
@@ -1428,10 +1497,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
-            mLastAlignmentEvent =
-                map_was_imu_initialized ? (priorA != 0.f ? "viba_1" : "viba_2") : "init_accepted";
-            mLastAlignmentRotationDeg =
-                Sophus::SO3f(mRwg.cast<float>().transpose()).log().norm() * 180.0 / M_PI;
+            mLastAlignmentEvent = alignment_event;
+            mLastAlignmentRotationDeg = alignment_rotation_deg;
             mLastAlignmentScale = mScale;
         }
 
@@ -1442,6 +1509,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
                 pKF2->bImu = true;
             }
     }
+    LogGravityCheck(alignment_event, mpCurrentKeyFrame, mRwg, mScale, alignment_rotation_deg);
 
     mpTracker->UpdateFrameIMU(1.0,vpKF[0]->GetImuBias(),mpCurrentKeyFrame);
     if (!mpAtlas->isImuInitialized())
@@ -1464,6 +1532,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, true, priorG, priorA);
         else
             Optimizer::FullInertialBA(mpAtlas->GetCurrentMap(), 100, false, mpCurrentKeyFrame->mnId, NULL, false);
+        LogGravityCheck("full_inertial_ba", mpCurrentKeyFrame, mRwg, mScale,
+                        alignment_rotation_deg);
     }
 
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
