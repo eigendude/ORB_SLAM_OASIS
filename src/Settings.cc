@@ -429,6 +429,10 @@ namespace ORB_SLAM3 {
         else{
             insertKFsWhenLost_ = true;
         }
+
+        cv::FileNode skipCrossEpochEdges = fSettings["IMU.Debug.SkipCrossEpochInertialEdges"];
+        debugSkipCrossEpochInertialEdges_ =
+            !skipCrossEpochEdges.empty() && static_cast<int>(skipCrossEpochEdges) != 0;
     }
 
     void Settings::readRGBD(cv::FileStorage& fSettings) {

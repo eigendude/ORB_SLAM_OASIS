@@ -2421,6 +2421,9 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
                                 int& num_edges,
                                 bool bLarge,
                                 bool bRecInit,
+                                bool bSkipCrossEpochInertialEdges,
+                                unsigned long initialImuKeyframeId,
+                                unsigned long lastVibaKeyframeId,
                                 LocalInertialBADiagnostic* diagnostic)
 {
   if (diagnostic)
@@ -2636,6 +2639,10 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
     vector<EdgeInertial*> vei(N,(EdgeInertial*)NULL);
     vector<EdgeGyroRW*> vegr(N,(EdgeGyroRW*)NULL);
     vector<EdgeAccRW*> vear(N,(EdgeAccRW*)NULL);
+    int skippedInertialEdges = 0;
+    int keptInertialEdges = 0;
+    bool skippedCrossEpochEdge = false;
+    bool skippedStalePreintegrationEdge = false;
 
     for(int i=0;i<N;i++)
     {
@@ -2648,21 +2655,48 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
         }
         if(pKFi->bImu && pKFi->mPrevKF->bImu && pKFi->mpImuPreintegrated)
         {
-            pKFi->mpImuPreintegrated->SetNewBias(pKFi->mPrevKF->GetImuBias());
-            g2o::HyperGraph::Vertex* VP1 = optimizer.vertex(pKFi->mPrevKF->mnId);
-            g2o::HyperGraph::Vertex* VV1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+1);
-            g2o::HyperGraph::Vertex* VG1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+2);
-            g2o::HyperGraph::Vertex* VA1 = optimizer.vertex(maxKFid+3*(pKFi->mPrevKF->mnId)+3);
-            g2o::HyperGraph::Vertex* VP2 =  optimizer.vertex(pKFi->mnId);
-            g2o::HyperGraph::Vertex* VV2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+1);
-            g2o::HyperGraph::Vertex* VG2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+2);
-            g2o::HyperGraph::Vertex* VA2 = optimizer.vertex(maxKFid+3*(pKFi->mnId)+3);
+          const IMU::Bias preintBias = pKFi->mpImuPreintegrated->GetOriginalBias();
+          const IMU::Bias currentPrevBias = pKFi->mPrevKF->GetImuBias();
+          const Eigen::Vector3f preintBa(preintBias.bax, preintBias.bay, preintBias.baz);
+          const Eigen::Vector3f preintBg(preintBias.bwx, preintBias.bwy, preintBias.bwz);
+          const Eigen::Vector3f currentPrevBa(currentPrevBias.bax, currentPrevBias.bay,
+                                              currentPrevBias.baz);
+          const Eigen::Vector3f currentPrevBg(currentPrevBias.bwx, currentPrevBias.bwy,
+                                              currentPrevBias.bwz);
+          const bool crossesInitBoundary = initialImuKeyframeId > 0 &&
+                                           pKFi->mPrevKF->mnId < initialImuKeyframeId &&
+                                           pKFi->mnId >= initialImuKeyframeId;
+          const bool crossesVibaBoundary = lastVibaKeyframeId > 0 &&
+                                           pKFi->mPrevKF->mnId < lastVibaKeyframeId &&
+                                           pKFi->mnId >= lastVibaKeyframeId;
+          const bool stalePreintegration = (currentPrevBa - preintBa).norm() > 0.05f ||
+                                           (currentPrevBg - preintBg).norm() > 0.01f;
+          if (bSkipCrossEpochInertialEdges &&
+              (crossesInitBoundary || crossesVibaBoundary || stalePreintegration))
+          {
+            skippedInertialEdges++;
+            skippedCrossEpochEdge =
+                skippedCrossEpochEdge || crossesInitBoundary || crossesVibaBoundary;
+            skippedStalePreintegrationEdge = skippedStalePreintegrationEdge || stalePreintegration;
+            continue;
+          }
+          keptInertialEdges++;
+          pKFi->mpImuPreintegrated->SetNewBias(pKFi->mPrevKF->GetImuBias());
+          g2o::HyperGraph::Vertex* VP1 = optimizer.vertex(pKFi->mPrevKF->mnId);
+          g2o::HyperGraph::Vertex* VV1 = optimizer.vertex(maxKFid + 3 * (pKFi->mPrevKF->mnId) + 1);
+          g2o::HyperGraph::Vertex* VG1 = optimizer.vertex(maxKFid + 3 * (pKFi->mPrevKF->mnId) + 2);
+          g2o::HyperGraph::Vertex* VA1 = optimizer.vertex(maxKFid + 3 * (pKFi->mPrevKF->mnId) + 3);
+          g2o::HyperGraph::Vertex* VP2 = optimizer.vertex(pKFi->mnId);
+          g2o::HyperGraph::Vertex* VV2 = optimizer.vertex(maxKFid + 3 * (pKFi->mnId) + 1);
+          g2o::HyperGraph::Vertex* VG2 = optimizer.vertex(maxKFid + 3 * (pKFi->mnId) + 2);
+          g2o::HyperGraph::Vertex* VA2 = optimizer.vertex(maxKFid + 3 * (pKFi->mnId) + 3);
 
-            if(!VP1 || !VV1 || !VG1 || !VA1 || !VP2 || !VV2 || !VG2 || !VA2)
-            {
-                cerr << "Error " << VP1 << ", "<< VV1 << ", "<< VG1 << ", "<< VA1 << ", " << VP2 << ", " << VV2 <<  ", "<< VG2 << ", "<< VA2 <<endl;
-                continue;
-            }
+          if (!VP1 || !VV1 || !VG1 || !VA1 || !VP2 || !VV2 || !VG2 || !VA2)
+          {
+            cerr << "Error " << VP1 << ", " << VV1 << ", " << VG1 << ", " << VA1 << ", " << VP2
+                 << ", " << VV2 << ", " << VG2 << ", " << VA2 << endl;
+            continue;
+          }
 
             vei[i] = new EdgeInertial(pKFi->mpImuPreintegrated);
 
@@ -2962,6 +2996,14 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
       diagnostic->inertial_chi2_after = inertialChi2After;
       diagnostic->active_chi2_before = err;
       diagnostic->active_chi2_after = err_end;
+      diagnostic->skipped_inertial_edges = skippedInertialEdges;
+      diagnostic->kept_inertial_edges = keptInertialEdges;
+      if (skippedCrossEpochEdge && skippedStalePreintegrationEdge)
+        diagnostic->skipped_inertial_edge_reason = "cross_epoch,stale_preintegration";
+      else if (skippedCrossEpochEdge)
+        diagnostic->skipped_inertial_edge_reason = "cross_epoch";
+      else if (skippedStalePreintegrationEdge)
+        diagnostic->skipped_inertial_edge_reason = "stale_preintegration";
       diagnostic->optimized_keyframe_ids.clear();
       diagnostic->fixed_keyframe_ids.clear();
       diagnostic->worst_inertial_edges.clear();
@@ -2986,6 +3028,9 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
         LocalInertialBADiagnostic::InertialEdgeDiagnostic edge;
         edge.prev_keyframe_id = pKFi->mPrevKF->mnId;
         edge.keyframe_id = pKFi->mnId;
+        edge.prev_timestamp = pKFi->mPrevKF->mTimeStamp;
+        edge.timestamp = pKFi->mTimeStamp;
+        edge.timestamp_dt = edge.timestamp - edge.prev_timestamp;
         edge.dt = pInt->dT;
         edge.imu_samples = static_cast<int>(pInt->NumMeasurements());
         edge.chi2_before =
@@ -3008,17 +3053,36 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
             Eigen::Vector3f(current_bias.bax, current_bias.bay, current_bias.baz);
         edge.current_gyro_bias =
             Eigen::Vector3f(current_bias.bwx, current_bias.bwy, current_bias.bwz);
+        const IMU::Bias keyframe_bias = pKFi->GetImuBias();
+        edge.keyframe_accel_bias =
+            Eigen::Vector3f(keyframe_bias.bax, keyframe_bias.bay, keyframe_bias.baz);
+        edge.keyframe_gyro_bias =
+            Eigen::Vector3f(keyframe_bias.bwx, keyframe_bias.bwy, keyframe_bias.bwz);
+        edge.prev_velocity = pKFi->mPrevKF->GetVelocity();
+        edge.keyframe_velocity = pKFi->GetVelocity();
         edge.preint_current_accel_bias_delta =
             (edge.current_accel_bias - edge.preint_accel_bias).norm();
         edge.preint_current_gyro_bias_delta =
             (edge.current_gyro_bias - edge.preint_gyro_bias).norm();
+        edge.crosses_init_boundary = initialImuKeyframeId > 0 &&
+                                     edge.prev_keyframe_id < initialImuKeyframeId &&
+                                     edge.keyframe_id >= initialImuKeyframeId;
+        edge.crosses_viba_boundary = lastVibaKeyframeId > 0 &&
+                                     edge.prev_keyframe_id < lastVibaKeyframeId &&
+                                     edge.keyframe_id >= lastVibaKeyframeId;
+        edge.stale_preintegration = edge.preint_current_accel_bias_delta > 0.05f ||
+                                    edge.preint_current_gyro_bias_delta > 0.01f;
+        edge.suspicious_dt = std::abs(edge.dt - edge.timestamp_dt) > 0.01 || edge.imu_samples < 2 ||
+                             edge.dt <= 0.0f || edge.timestamp_dt <= 0.0;
+        edge.suspicious_velocity =
+            edge.prev_velocity.norm() > 1.0f || edge.keyframe_velocity.norm() > 1.0f;
         inertial_edges.push_back(edge);
       }
       std::sort(inertial_edges.begin(), inertial_edges.end(),
                 [](const LocalInertialBADiagnostic::InertialEdgeDiagnostic& lhs,
                    const LocalInertialBADiagnostic::InertialEdgeDiagnostic& rhs)
-                { return lhs.chi2_after > rhs.chi2_after; });
-      const size_t nWorstEdges = std::min<size_t>(3, inertial_edges.size());
+                { return lhs.chi2_before > rhs.chi2_before; });
+      const size_t nWorstEdges = std::min<size_t>(5, inertial_edges.size());
       diagnostic->worst_inertial_edges.assign(inertial_edges.begin(),
                                               inertial_edges.begin() + nWorstEdges);
     }

@@ -200,6 +200,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         mpLocalMapper->mThFarPoints = settings_->thFarPoints();
     else
         mpLocalMapper->mThFarPoints = fsSettings["thFarPoints"];
+    if (settings_)
+      mpLocalMapper->mDebugSkipCrossEpochInertialEdges =
+          settings_->debugSkipCrossEpochInertialEdges();
+    else
+      mpLocalMapper->mDebugSkipCrossEpochInertialEdges = false;
     if(mpLocalMapper->mThFarPoints!=0)
     {
         cout << "Discard points further than " << mpLocalMapper->mThFarPoints << " m from current camera" << endl;

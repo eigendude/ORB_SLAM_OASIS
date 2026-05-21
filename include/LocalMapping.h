@@ -111,6 +111,9 @@ public:
     bool mLastInitLifecycleCommitted;
     bool mFinalInitEpochValid;
     bool mIbaForensicLogged;
+    bool mIbaForensicLoggedAfterInit;
+    bool mIbaForensicLoggedAfterViba;
+    bool mDebugSkipCrossEpochInertialEdges;
     double mMaxInitScaleDeviation;
     double mMaxInitAccelBiasNorm;
     double mMaxInitGyroBiasNorm;

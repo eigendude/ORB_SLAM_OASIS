@@ -52,6 +52,9 @@ public:
     {
       unsigned long prev_keyframe_id = 0;
       unsigned long keyframe_id = 0;
+      double prev_timestamp = 0.0;
+      double timestamp = 0.0;
+      double timestamp_dt = 0.0;
       float dt = 0.0f;
       int imu_samples = 0;
       double chi2_before = 0.0;
@@ -65,9 +68,17 @@ public:
       Eigen::Vector3f preint_gyro_bias = Eigen::Vector3f::Zero();
       Eigen::Vector3f current_accel_bias = Eigen::Vector3f::Zero();
       Eigen::Vector3f current_gyro_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f keyframe_accel_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f keyframe_gyro_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f prev_velocity = Eigen::Vector3f::Zero();
+      Eigen::Vector3f keyframe_velocity = Eigen::Vector3f::Zero();
       float preint_current_accel_bias_delta = 0.0f;
       float preint_current_gyro_bias_delta = 0.0f;
       bool crosses_init_boundary = false;
+      bool crosses_viba_boundary = false;
+      bool stale_preintegration = false;
+      bool suspicious_dt = false;
+      bool suspicious_velocity = false;
     };
 
     int optimized_keyframes = 0;
@@ -83,6 +94,9 @@ public:
     double inertial_chi2_after = 0.0;
     double active_chi2_before = 0.0;
     double active_chi2_after = 0.0;
+    int skipped_inertial_edges = 0;
+    int kept_inertial_edges = 0;
+    std::string skipped_inertial_edge_reason;
     std::vector<unsigned long> optimized_keyframe_ids;
     std::vector<unsigned long> fixed_keyframe_ids;
     std::vector<InertialEdgeDiagnostic> worst_inertial_edges;
@@ -133,6 +147,9 @@ public:
                                 int& num_edges,
                                 bool bLarge = false,
                                 bool bRecInit = false,
+                                bool bSkipCrossEpochInertialEdges = false,
+                                unsigned long initialImuKeyframeId = 0,
+                                unsigned long lastVibaKeyframeId = 0,
                                 LocalInertialBADiagnostic* diagnostic = NULL);
     void static MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbStopFlag, Map *pMap, LoopClosing::KeyFrameAndPose &corrPoses);
 

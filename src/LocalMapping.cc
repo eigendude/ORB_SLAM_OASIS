@@ -595,7 +595,9 @@ void LogLocalInertialBA(const InertialUpdateSnapshot& before,
 
 std::string FirstIbaAnomalyReason(const InertialUpdateSnapshot& before,
                                   const InertialUpdateSnapshot& after,
-                                  const Optimizer::LocalInertialBADiagnostic& diagnostic)
+                                  const Optimizer::LocalInertialBADiagnostic& diagnostic,
+                                  const bool first_after_init,
+                                  const bool first_after_viba)
 {
   if (!before.valid || !after.valid)
     return "";
@@ -613,7 +615,19 @@ std::string FirstIbaAnomalyReason(const InertialUpdateSnapshot& before,
       diagnostic.inertial_chi2_before > 1e-9
           ? diagnostic.inertial_chi2_after / diagnostic.inertial_chi2_before
           : 1.0;
+  const double inertial_chi2_per_edge =
+      diagnostic.inertial_edges > 0
+          ? diagnostic.inertial_chi2_before / static_cast<double>(diagnostic.inertial_edges)
+          : diagnostic.inertial_chi2_before;
 
+  if (diagnostic.inertial_chi2_before > 1e6)
+    return "huge_chi_i_before";
+  if (inertial_chi2_per_edge > 1e4)
+    return "huge_chi_i_per_edge_before";
+  if (first_after_viba)
+    return "first_iba_after_viba";
+  if (first_after_init)
+    return "first_iba_after_init";
   if (after.accel_bias.norm() > 0.25f)
     return "ba_norm";
   if (dba.norm() > 0.10f)
@@ -634,6 +648,13 @@ std::string FirstIbaAnomalyReason(const InertialUpdateSnapshot& before,
 void LogIbaForensic(const unsigned long attempt_id,
                     const unsigned long map_id,
                     const unsigned long initial_imu_keyframe_id,
+                    const unsigned long current_keyframe_id,
+                    const std::string& last_alignment_event,
+                    const double last_alignment_dR,
+                    const double since_viba_sec,
+                    const long since_viba_kfs,
+                    const bool map_inertial_ba1,
+                    const bool map_inertial_ba2,
                     const std::string& reason,
                     const InertialUpdateSnapshot& before,
                     const InertialUpdateSnapshot& after,
@@ -656,18 +677,28 @@ void LogIbaForensic(const unsigned long attempt_id,
           : -1.0;
 
   bool crosses_init_boundary = false;
+  bool crosses_viba_boundary = false;
   bool stale_preintegration = false;
+  bool suspicious_dt = false;
+  bool suspicious_velocity = false;
   for (const auto& edge : diagnostic.worst_inertial_edges)
   {
-    crosses_init_boundary =
-        crosses_init_boundary || (edge.prev_keyframe_id < initial_imu_keyframe_id &&
-                                  edge.keyframe_id >= initial_imu_keyframe_id);
-    stale_preintegration = stale_preintegration || edge.preint_current_accel_bias_delta > 0.05f ||
-                           edge.preint_current_gyro_bias_delta > 0.01f;
+    crosses_init_boundary = crosses_init_boundary || edge.crosses_init_boundary;
+    crosses_viba_boundary = crosses_viba_boundary || edge.crosses_viba_boundary;
+    stale_preintegration = stale_preintegration || edge.stale_preintegration;
+    suspicious_dt = suspicious_dt || edge.suspicious_dt;
+    suspicious_velocity = suspicious_velocity || edge.suspicious_velocity;
   }
+  const bool visual_inertial_conflict = visual_ratio >= 0.0 && inertial_ratio >= 0.0 &&
+                                        visual_ratio < 1.0 && diagnostic.inertial_chi2_before > 1e6;
 
   std::cout << "MI iba_forensic:" << " attempt=" << attempt_id << " map_id=" << map_id
-            << " reason=" << reason << " opt_kfs=" << diagnostic.optimized_keyframes
+            << " reason=" << reason << " last_align=" << last_alignment_event
+            << " last_dR=" << last_alignment_dR << " since_viba=" << since_viba_sec << "s/"
+            << since_viba_kfs << "kf" << " iba1=" << (map_inertial_ba1 ? 1 : 0)
+            << " iba2=" << (map_inertial_ba2 ? 1 : 0) << " cur_kf=" << current_keyframe_id
+            << " init_kf=" << initial_imu_keyframe_id
+            << " opt_kfs=" << diagnostic.optimized_keyframes
             << " fixed_kfs=" << diagnostic.fixed_keyframes
             << " opt_ids=" << FormatUnsignedLongList(diagnostic.optimized_keyframe_ids)
             << " fixed_ids=" << FormatUnsignedLongList(diagnostic.fixed_keyframe_ids)
@@ -687,13 +718,20 @@ void LogIbaForensic(const unsigned long attempt_id,
             << " chi_v=" << diagnostic.visual_chi2_before << "->" << diagnostic.visual_chi2_after
             << " rv=" << visual_ratio << " chi_i=" << diagnostic.inertial_chi2_before << "->"
             << diagnostic.inertial_chi2_after << " ri=" << inertial_ratio
-            << " init_kf=" << initial_imu_keyframe_id
-            << " edge_cross_epoch=" << (crosses_init_boundary ? 1 : 0)
-            << " stale_preint=" << (stale_preintegration ? 1 : 0) << std::endl;
+            << " active_chi=" << diagnostic.active_chi2_before << "->"
+            << diagnostic.active_chi2_after
+            << " suspected_stale_preintegration=" << (stale_preintegration ? 1 : 0)
+            << " suspected_epoch_crossing="
+            << ((crosses_init_boundary || crosses_viba_boundary) ? 1 : 0)
+            << " suspected_bad_dt=" << (suspicious_dt ? 1 : 0)
+            << " suspected_velocity_inconsistency=" << (suspicious_velocity ? 1 : 0)
+            << " suspected_visual_inertial_conflict=" << (visual_inertial_conflict ? 1 : 0)
+            << " skipped=" << diagnostic.skipped_inertial_edges
+            << " kept=" << diagnostic.kept_inertial_edges << std::endl;
 
-  if (crosses_init_boundary)
+  if (crosses_init_boundary || crosses_viba_boundary)
     std::cout << "MI iba_epoch_mismatch:" << " attempt=" << attempt_id << " map_id=" << map_id
-              << " init_kf=" << initial_imu_keyframe_id
+              << " init_kf=" << initial_imu_keyframe_id << " last_viba_kfs=" << since_viba_kfs
               << " opt_ids=" << FormatUnsignedLongList(diagnostic.optimized_keyframe_ids)
               << std::endl;
   if (stale_preintegration)
@@ -703,20 +741,29 @@ void LogIbaForensic(const unsigned long attempt_id,
   for (size_t i = 0; i < diagnostic.worst_inertial_edges.size(); ++i)
   {
     const auto& edge = diagnostic.worst_inertial_edges[i];
-    const bool edge_crosses_epoch = edge.prev_keyframe_id < initial_imu_keyframe_id &&
-                                    edge.keyframe_id >= initial_imu_keyframe_id;
     std::cout << "MI iba_forensic_edge:" << " rank=" << i << " kf=" << edge.prev_keyframe_id << "->"
-              << edge.keyframe_id << " dt=" << edge.dt << " samples=" << edge.imu_samples
-              << " chi2=" << edge.chi2_before << "->" << edge.chi2_after
-              << " dR=" << edge.dR_angle_deg << " dV=" << FormatVector3Compact(edge.dV)
-              << " dP=" << FormatVector3Compact(edge.dP)
+              << edge.keyframe_id << " t=" << edge.prev_timestamp << "->" << edge.timestamp
+              << " tdt=" << edge.timestamp_dt << " dT=" << edge.dt
+              << " samples=" << edge.imu_samples << " chi2=" << edge.chi2_before << "->"
+              << edge.chi2_after << " dR=" << edge.dR_angle_deg
+              << " dV=" << FormatVector3Compact(edge.dV) << " dP=" << FormatVector3Compact(edge.dP)
               << " mean_accel=" << FormatVector3Compact(edge.mean_accel)
               << " mean_gyro=" << FormatVector3Compact(edge.mean_gyro)
               << " ba_preint=" << FormatVector3Compact(edge.preint_accel_bias)
-              << " ba_edge=" << FormatVector3Compact(edge.current_accel_bias)
+              << " bg_preint=" << FormatVector3Compact(edge.preint_gyro_bias)
+              << " ba_prev=" << FormatVector3Compact(edge.current_accel_bias)
+              << " bg_prev=" << FormatVector3Compact(edge.current_gyro_bias)
+              << " ba_cur=" << FormatVector3Compact(edge.keyframe_accel_bias)
+              << " bg_cur=" << FormatVector3Compact(edge.keyframe_gyro_bias)
+              << " vel_prev=" << edge.prev_velocity.norm()
+              << " vel_cur=" << edge.keyframe_velocity.norm()
               << " dba_preint=" << edge.preint_current_accel_bias_delta
               << " dbg_preint=" << edge.preint_current_gyro_bias_delta
-              << " crosses_epoch=" << (edge_crosses_epoch ? 1 : 0) << std::endl;
+              << " cross_init=" << (edge.crosses_init_boundary ? 1 : 0)
+              << " cross_viba=" << (edge.crosses_viba_boundary ? 1 : 0)
+              << " stale=" << (edge.stale_preintegration ? 1 : 0)
+              << " bad_dt=" << (edge.suspicious_dt ? 1 : 0)
+              << " bad_vel=" << (edge.suspicious_velocity ? 1 : 0) << std::endl;
   }
 }
 
@@ -737,6 +784,9 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mLastInitLifecycleCommitted = false;
     mFinalInitEpochValid = false;
     mIbaForensicLogged = false;
+    mIbaForensicLoggedAfterInit = false;
+    mIbaForensicLoggedAfterViba = false;
+    mDebugSkipCrossEpochInertialEdges = false;
     mMaxInitScaleDeviation = 0.0;
     mMaxInitAccelBiasNorm = 0.0;
     mMaxInitGyroBiasNorm = 0.0;
@@ -936,14 +986,29 @@ void LocalMapping::Run()
                             mLastViba1Time >= 0.0 ? static_cast<long>(mpCurrentKeyFrame->mnId) -
                                                         static_cast<long>(mLastViba1KfId)
                                                   : -1;
+                        const bool first_iba_after_viba =
+                            mLastViba1Time >= 0.0 && !mIbaForensicLoggedAfterViba;
+                        const bool first_iba_after_init =
+                            mLastViba1Time < 0.0 && !mIbaForensicLoggedAfterInit;
                         Optimizer::LocalInertialBA(
                             mpCurrentKeyFrame, &mbAbortBA, mpCurrentKeyFrame->GetMap(),
                             num_FixedKF_BA, num_OptKF_BA, num_MPs_BA, num_edges_BA, bLarge,
-                            !mpCurrentKeyFrame->GetMap()->GetIniertialBA2(), &iba_diagnostic);
+                            !mpCurrentKeyFrame->GetMap()->GetIniertialBA2(),
+                            mDebugSkipCrossEpochInertialEdges, mInitialImuKeyframeId,
+                            mLastViba1KfId, &iba_diagnostic);
                         const InertialUpdateSnapshot after_inertial_ba =
                             CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
                         LogLocalInertialBA(before_inertial_ba, after_inertial_ba, iba_diagnostic,
                                            since_viba_sec, since_viba_kfs);
+                        if (mDebugSkipCrossEpochInertialEdges &&
+                            iba_diagnostic.skipped_inertial_edges > 0)
+                        {
+                          std::cout << "MI iba_experiment:" << " skip_cross_epoch_edges=1 skipped="
+                                    << iba_diagnostic.skipped_inertial_edges
+                                    << " kept=" << iba_diagnostic.kept_inertial_edges
+                                    << " reason=" << iba_diagnostic.skipped_inertial_edge_reason
+                                    << std::endl;
+                        }
                         const double visual_ratio = iba_diagnostic.visual_chi2_before > 1e-9
                                                         ? iba_diagnostic.visual_chi2_after /
                                                               iba_diagnostic.visual_chi2_before
@@ -968,20 +1033,29 @@ void LocalMapping::Run()
                         mWorstInitInertialChi2Ratio =
                             std::max(mWorstInitInertialChi2Ratio, inertial_ratio);
                         const std::string iba_anomaly_reason = FirstIbaAnomalyReason(
-                            before_inertial_ba, after_inertial_ba, iba_diagnostic);
+                            before_inertial_ba, after_inertial_ba, iba_diagnostic,
+                            first_iba_after_init, first_iba_after_viba);
                         if (!iba_anomaly_reason.empty())
                         {
                           if (mFirstInitAnomalyReason == "none")
                             mFirstInitAnomalyReason = iba_anomaly_reason;
-                          if (!mIbaForensicLogged)
+                          bool& forensic_logged_for_epoch = mLastViba1Time >= 0.0
+                                                                ? mIbaForensicLoggedAfterViba
+                                                                : mIbaForensicLoggedAfterInit;
+                          if (!forensic_logged_for_epoch)
                           {
                             const unsigned long map_id = mpCurrentKeyFrame->GetMap()
                                                              ? mpCurrentKeyFrame->GetMap()->GetId()
                                                              : 0;
-                            LogIbaForensic(mInertialInitAttemptId, map_id, mInitialImuKeyframeId,
-                                           iba_anomaly_reason, before_inertial_ba,
-                                           after_inertial_ba, iba_diagnostic);
+                            LogIbaForensic(
+                                mInertialInitAttemptId, map_id, mInitialImuKeyframeId,
+                                mpCurrentKeyFrame->mnId, mLastAlignmentEvent,
+                                mLastAlignmentRotationDeg, since_viba_sec, since_viba_kfs,
+                                mpCurrentKeyFrame->GetMap()->GetIniertialBA1(),
+                                mpCurrentKeyFrame->GetMap()->GetIniertialBA2(), iba_anomaly_reason,
+                                before_inertial_ba, after_inertial_ba, iba_diagnostic);
                             mIbaForensicLogged = true;
+                            forensic_logged_for_epoch = true;
                           }
                         }
                         b_doneLBA = true;
@@ -1062,6 +1136,7 @@ void LocalMapping::Run()
                                     CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame), true);
                                 mLastViba1Time = mpCurrentKeyFrame->mTimeStamp;
                                 mLastViba1KfId = mpCurrentKeyFrame->mnId;
+                                mIbaForensicLoggedAfterViba = false;
 
                                 cout << "end VIBA 1" << endl;
                             }
@@ -1987,6 +2062,8 @@ void LocalMapping::ResetIfRequested()
             mLastInitLifecycleCommitted = false;
             mFinalInitEpochValid = false;
             mIbaForensicLogged = false;
+            mIbaForensicLoggedAfterInit = false;
+            mIbaForensicLoggedAfterViba = false;
             mMaxInitScaleDeviation = 0.0;
             mMaxInitAccelBiasNorm = 0.0;
             mMaxInitGyroBiasNorm = 0.0;
@@ -2024,6 +2101,8 @@ void LocalMapping::ResetIfRequested()
             mLastInitLifecycleCommitted = false;
             mFinalInitEpochValid = false;
             mIbaForensicLogged = false;
+            mIbaForensicLoggedAfterInit = false;
+            mIbaForensicLoggedAfterViba = false;
             mMaxInitScaleDeviation = 0.0;
             mMaxInitAccelBiasNorm = 0.0;
             mMaxInitGyroBiasNorm = 0.0;
@@ -2118,6 +2197,8 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
       mLastInitLifecycleCommitted = false;
       mFinalInitEpochValid = false;
       mIbaForensicLogged = false;
+      mIbaForensicLoggedAfterInit = false;
+      mIbaForensicLoggedAfterViba = false;
     }
 
     bInitializing = true;
