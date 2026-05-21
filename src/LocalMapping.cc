@@ -708,46 +708,26 @@ void LocalMapping::Run()
                       if (dist > 0.05)
                         mTinit +=
                             mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
-                      const bool motion_check_not_enough =
+                      const bool post_align_motion_check_not_enough =
                           !mpCurrentKeyFrame->GetMap()->GetIniertialBA2() && (mTinit < 10.f) &&
                           (dist >= 0.0f) && (dist < 0.02);
                       if (!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                       {
-                        if (motion_check_not_enough)
+                        if (post_align_motion_check_not_enough)
                         {
-                          std::cout << "MI init_lifecycle_bug: post_align_not_enough_motion"
-                                    << " attempt=" << mInertialInitAttemptId << " mTinit=" << mTinit
-                                    << " dist=" << dist << " kfs=" << mpAtlas->KeyFramesInMap()
-                                    << " map=" << mpAtlas->MapPointsInMap() << std::endl;
-                          std::cout << "MI init_rejected:" << " reason=not_enough_motion"
-                                    << " mTinit=" << mTinit << " dist=" << dist
-                                    << " kfs=" << mpAtlas->KeyFramesInMap()
-                                    << " map=" << mpAtlas->MapPointsInMap()
-                                    << " inl=" << mpTracker->GetMatchesInliers() << std::endl;
-                          std::cout << "MI init_lifecycle:" << " attempt=" << mInertialInitAttemptId
-                                    << " phase=motion_check after_align=1 map_imu="
-                                    << (mpCurrentKeyFrame->GetMap()->isImuInitialized() ? 1 : 0)
-                                    << " tracking_state=" << mpTracker->mState
-                                    << " bad_imu=1 motion=not_enough should_publish=0 committed=0"
-                                    << " reset=1 mTinit=" << mTinit << " dist=" << dist
-                                    << " kfs=" << mpAtlas->KeyFramesInMap()
-                                    << " map=" << mpAtlas->MapPointsInMap() << std::endl;
-                          cout << "Not enough motion for initializing. Reseting..." << endl;
-                          if (mpTracker)
-                          {
-                            mpTracker->RecordTrackingFailure(
-                                TrackingFailureReason::NotEnoughMotionForImuInitialization,
-                                mpCurrentKeyFrame->mTimeStamp);
-                          }
-                          std::unique_lock<std::mutex> lock(mMutexReset);
-                          mbResetRequestedActiveMap = true;
-                          mpMapToReset = mpCurrentKeyFrame->GetMap();
-                          mbBadImu = true;
+                          std::cout
+                              << "MI init_lifecycle_warn: ignored_post_align_not_enough_motion"
+                              << " attempt=" << mInertialInitAttemptId << " mTinit=" << mTinit
+                              << " dist=" << dist << " kfs=" << mpAtlas->KeyFramesInMap()
+                              << " map=" << mpAtlas->MapPointsInMap()
+                              << " map_imu=1 mutation_started=1 final_epoch_valid="
+                              << (mFinalInitEpochValid ? 1 : 0)
+                              << " reset=0 reason=post_align_motion_check_is_diagnostic"
+                              << std::endl;
                         }
                       }
                       const bool init_ready_for_commit =
-                          !motion_check_not_enough && !mbBadImu &&
-                          mpCurrentKeyFrame->GetMap()->isImuInitialized() &&
+                          !mbBadImu && mpCurrentKeyFrame->GetMap()->isImuInitialized() &&
                           !IsInertialInitializationProvisional();
                       if (init_ready_for_commit && !mLastInitLifecycleCommitted)
                       {
