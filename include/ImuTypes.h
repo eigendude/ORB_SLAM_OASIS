@@ -198,6 +198,7 @@ public:
 
     Bias GetOriginalBias();
     Bias GetUpdatedBias();
+    size_t NumMeasurements() const { return mvMeasurements.size(); }
 
     void printMeasurements() const {
         std::cout << "pint meas:\n";

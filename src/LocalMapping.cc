@@ -47,6 +47,8 @@ struct InertialUpdateSnapshot
   double timestamp = 0.0;
   double scale = 1.0;
   Eigen::Vector3d gravity = Eigen::Vector3d(0.0, 0.0, -1.0);
+  Eigen::Vector3d gravity_camera = Eigen::Vector3d::Zero();
+  Eigen::Vector3d gravity_body = Eigen::Vector3d::Zero();
   Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
   Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();
   Eigen::Vector3f accel_bias = Eigen::Vector3f::Zero();
@@ -108,6 +110,20 @@ std::string FormatVector3Compact(const Eigen::Vector3f& v)
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3) << "(" << v.x() << "," << v.y() << "," << v.z()
          << ")";
+  return stream.str();
+}
+
+std::string FormatUnsignedLongList(const std::vector<unsigned long>& values)
+{
+  std::ostringstream stream;
+  stream << "[";
+  for (size_t i = 0; i < values.size(); ++i)
+  {
+    if (i > 0)
+      stream << ",";
+    stream << values[i];
+  }
+  stream << "]";
   return stream.str();
 }
 
@@ -375,18 +391,6 @@ void LogAlignmentTrace(const std::string& event_name,
   const bool body_ok = UnitDot(after.gravity_body, -Eigen::Vector3d::UnitZ()) > 0.9;
   const bool camera_ok = UnitDot(after.gravity_camera, Eigen::Vector3d::UnitY()) > 0.9;
 
-  std::cout << "MI align_formula:" << " function=LocalMapping::InitializeIMU"
-            << " event=" << event_name << " input_gravity=g_old_world=mRwg*(0,0,-1)_gravity_accel"
-            << " input_frame=pre_alignment_visual_world"
-            << " target_gravity=g_new_world=(0,0,-1)_gravity_accel"
-            << " target_frame=post_alignment_gravity_world"
-            << " Rwg_rpy=" << FormatRpyDegCompact(Rwg_f)
-            << " Rgw_rpy=" << FormatRpyDegCompact(Rgw_f)
-            << " Rwg_angle=" << RotationAngleRad(Rwg_f, Eigen::Matrix3f::Identity()) * 180.0 / M_PI
-            << " applied=Twg=Rwg^T,ApplyScaledRotation(Twg,s,true)"
-            << " Tbc_applied_for_body_check=1 Tcb_applied=0"
-            << " vector_semantics=gravity_accel_not_specific_force s=" << scale << std::endl;
-
   std::cout << "MI align_candidate:" << " event=" << event_name << " s_before=" << before.scale
             << " s_after=" << after.scale << " dscale=" << dscale
             << " dR_rpy=" << FormatRpyDegCompact(dRcw) << " dR_angle=" << dRdeg
@@ -411,6 +415,22 @@ void LogAlignmentTrace(const std::string& event_name,
             << " specific_force_body_dot_z="
             << UnitDot(after.specific_force_body, Eigen::Vector3d::UnitZ())
             << " ok=" << (body_ok ? 1 : 0) << std::endl;
+
+  const bool reprojection_ok = after.reprojection.projected > 0 && after.reprojection.inliers > 0;
+  if (body_ok && reprojection_ok)
+    return;
+
+  std::cout << "MI align_formula:" << " function=LocalMapping::InitializeIMU"
+            << " event=" << event_name << " input_gravity=g_old_world=mRwg*(0,0,-1)_gravity_accel"
+            << " input_frame=pre_alignment_visual_world"
+            << " target_gravity=g_new_world=(0,0,-1)_gravity_accel"
+            << " target_frame=post_alignment_gravity_world"
+            << " Rwg_rpy=" << FormatRpyDegCompact(Rwg_f)
+            << " Rgw_rpy=" << FormatRpyDegCompact(Rgw_f)
+            << " Rwg_angle=" << RotationAngleRad(Rwg_f, Eigen::Matrix3f::Identity()) * 180.0 / M_PI
+            << " applied=Twg=Rwg^T,ApplyScaledRotation(Twg,s,true)"
+            << " Tbc_applied_for_body_check=1 Tcb_applied=0"
+            << " vector_semantics=gravity_accel_not_specific_force s=" << scale << std::endl;
   if (!body_ok)
   {
     std::cout << "MI align_invariant_warn:" << " event=" << event_name
@@ -487,6 +507,9 @@ InertialUpdateSnapshot CaptureInertialUpdateSnapshot(LocalMapping* local_mapper,
     snapshot.gyro_bias = keyframe->GetGyroBias();
     snapshot.accel_bias = keyframe->GetAccBias();
     snapshot.pose = keyframe->GetPose();
+    snapshot.gravity_camera = snapshot.pose.rotationMatrix().cast<double>() * snapshot.gravity;
+    snapshot.gravity_body =
+        keyframe->mImuCalib.mTbc.rotationMatrix().cast<double>() * snapshot.gravity_camera;
   }
 
   return snapshot;
@@ -570,6 +593,133 @@ void LogLocalInertialBA(const InertialUpdateSnapshot& before,
   }
 }
 
+std::string FirstIbaAnomalyReason(const InertialUpdateSnapshot& before,
+                                  const InertialUpdateSnapshot& after,
+                                  const Optimizer::LocalInertialBADiagnostic& diagnostic)
+{
+  if (!before.valid || !after.valid)
+    return "";
+
+  const Sophus::SE3f beforeTwc = before.pose.inverse();
+  const Sophus::SE3f afterTwc = after.pose.inverse();
+  const double dr_deg =
+      RotationAngleRad(beforeTwc.rotationMatrix(), afterTwc.rotationMatrix()) * 180.0 / M_PI;
+  const Eigen::Vector3f dpos = afterTwc.translation() - beforeTwc.translation();
+  const Eigen::Vector3f dba = after.accel_bias - before.accel_bias;
+  const double visual_ratio = diagnostic.visual_chi2_before > 1e-9
+                                  ? diagnostic.visual_chi2_after / diagnostic.visual_chi2_before
+                                  : 1.0;
+  const double inertial_ratio =
+      diagnostic.inertial_chi2_before > 1e-9
+          ? diagnostic.inertial_chi2_after / diagnostic.inertial_chi2_before
+          : 1.0;
+
+  if (after.accel_bias.norm() > 0.25f)
+    return "ba_norm";
+  if (dba.norm() > 0.10f)
+    return "dba";
+  if (after.velocity.norm() > 1.0f)
+    return "velocity";
+  if (visual_ratio < 0.9 && inertial_ratio > 1.5)
+    return "chi2_tradeoff";
+  if (std::abs(after.scale - before.scale) > std::abs(before.scale) * 0.25)
+    return "scale_delta";
+  if (dr_deg > 5.0)
+    return "pose_rotation";
+  if (dpos.norm() > 0.10f)
+    return "pose_translation";
+  return "";
+}
+
+void LogIbaForensic(const unsigned long attempt_id,
+                    const unsigned long map_id,
+                    const unsigned long initial_imu_keyframe_id,
+                    const std::string& reason,
+                    const InertialUpdateSnapshot& before,
+                    const InertialUpdateSnapshot& after,
+                    const Optimizer::LocalInertialBADiagnostic& diagnostic)
+{
+  const Sophus::SE3f beforeTwc = before.pose.inverse();
+  const Sophus::SE3f afterTwc = after.pose.inverse();
+  const double dr_deg =
+      RotationAngleRad(beforeTwc.rotationMatrix(), afterTwc.rotationMatrix()) * 180.0 / M_PI;
+  const Eigen::Vector3f dpos = afterTwc.translation() - beforeTwc.translation();
+  const Eigen::Vector3f dba = after.accel_bias - before.accel_bias;
+  const Eigen::Vector3f dbg = after.gyro_bias - before.gyro_bias;
+  const Eigen::Vector3f dvel = after.velocity - before.velocity;
+  const double visual_ratio = diagnostic.visual_chi2_before > 1e-9
+                                  ? diagnostic.visual_chi2_after / diagnostic.visual_chi2_before
+                                  : -1.0;
+  const double inertial_ratio =
+      diagnostic.inertial_chi2_before > 1e-9
+          ? diagnostic.inertial_chi2_after / diagnostic.inertial_chi2_before
+          : -1.0;
+
+  bool crosses_init_boundary = false;
+  bool stale_preintegration = false;
+  for (const auto& edge : diagnostic.worst_inertial_edges)
+  {
+    crosses_init_boundary =
+        crosses_init_boundary || (edge.prev_keyframe_id < initial_imu_keyframe_id &&
+                                  edge.keyframe_id >= initial_imu_keyframe_id);
+    stale_preintegration = stale_preintegration || edge.preint_current_accel_bias_delta > 0.05f ||
+                           edge.preint_current_gyro_bias_delta > 0.01f;
+  }
+
+  std::cout << "MI iba_forensic:" << " attempt=" << attempt_id << " map_id=" << map_id
+            << " reason=" << reason << " opt_kfs=" << diagnostic.optimized_keyframes
+            << " fixed_kfs=" << diagnostic.fixed_keyframes
+            << " opt_ids=" << FormatUnsignedLongList(diagnostic.optimized_keyframe_ids)
+            << " fixed_ids=" << FormatUnsignedLongList(diagnostic.fixed_keyframe_ids)
+            << " edges_v/i/rw=" << diagnostic.visual_edges << "/" << diagnostic.inertial_edges
+            << "/" << diagnostic.bias_random_walk_edges
+            << " local_mps=" << diagnostic.local_map_points
+            << " visual_inliers=" << diagnostic.visual_inliers_after << " s=" << after.scale
+            << " gravity_world=" << FormatVector3Compact(after.gravity)
+            << " gravity_camera=" << FormatVector3Compact(after.gravity_camera)
+            << " gravity_body=" << FormatVector3Compact(after.gravity_body)
+            << " ba=" << FormatVector3Compact(before.accel_bias) << "->"
+            << FormatVector3Compact(after.accel_bias) << " dba=" << dba.norm()
+            << " bg=" << FormatVector3Compact(before.gyro_bias) << "->"
+            << FormatVector3Compact(after.gyro_bias) << " dbg=" << dbg.norm()
+            << " vel=" << before.velocity.norm() << "->" << after.velocity.norm()
+            << " dvel=" << dvel.norm() << " dr=" << dr_deg << " dpos=" << dpos.norm()
+            << " chi_v=" << diagnostic.visual_chi2_before << "->" << diagnostic.visual_chi2_after
+            << " rv=" << visual_ratio << " chi_i=" << diagnostic.inertial_chi2_before << "->"
+            << diagnostic.inertial_chi2_after << " ri=" << inertial_ratio
+            << " init_kf=" << initial_imu_keyframe_id
+            << " edge_cross_epoch=" << (crosses_init_boundary ? 1 : 0)
+            << " stale_preint=" << (stale_preintegration ? 1 : 0) << std::endl;
+
+  if (crosses_init_boundary)
+    std::cout << "MI iba_epoch_mismatch:" << " attempt=" << attempt_id << " map_id=" << map_id
+              << " init_kf=" << initial_imu_keyframe_id
+              << " opt_ids=" << FormatUnsignedLongList(diagnostic.optimized_keyframe_ids)
+              << std::endl;
+  if (stale_preintegration)
+    std::cout << "MI iba_stale_preintegration:" << " attempt=" << attempt_id << " map_id=" << map_id
+              << " reason=bias_delta_vs_preintegration" << std::endl;
+
+  for (size_t i = 0; i < diagnostic.worst_inertial_edges.size(); ++i)
+  {
+    const auto& edge = diagnostic.worst_inertial_edges[i];
+    const bool edge_crosses_epoch = edge.prev_keyframe_id < initial_imu_keyframe_id &&
+                                    edge.keyframe_id >= initial_imu_keyframe_id;
+    std::cout << "MI iba_forensic_edge:" << " rank=" << i << " kf=" << edge.prev_keyframe_id << "->"
+              << edge.keyframe_id << " dt=" << edge.dt << " samples=" << edge.imu_samples
+              << " chi2=" << edge.chi2_before << "->" << edge.chi2_after
+              << " dR=" << edge.dR_angle_deg << " dV=" << FormatVector3Compact(edge.dV)
+              << " dP=" << FormatVector3Compact(edge.dP)
+              << " mean_accel=" << FormatVector3Compact(edge.mean_accel)
+              << " mean_gyro=" << FormatVector3Compact(edge.mean_gyro)
+              << " ba_preint=" << FormatVector3Compact(edge.preint_accel_bias)
+              << " ba_edge=" << FormatVector3Compact(edge.current_accel_bias)
+              << " dba_preint=" << edge.preint_current_accel_bias_delta
+              << " dbg_preint=" << edge.preint_current_gyro_bias_delta
+              << " crosses_epoch=" << (edge_crosses_epoch ? 1 : 0) << std::endl;
+  }
+}
+
 } // namespace
 
 LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
@@ -586,6 +736,14 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mInertialInitAttemptId = 0;
     mLastInitLifecycleCommitted = false;
     mFinalInitEpochValid = false;
+    mIbaForensicLogged = false;
+    mMaxInitScaleDeviation = 0.0;
+    mMaxInitAccelBiasNorm = 0.0;
+    mMaxInitGyroBiasNorm = 0.0;
+    mMaxInitVelocityNorm = 0.0;
+    mWorstInitVisualChi2Ratio = 1.0;
+    mWorstInitInertialChi2Ratio = 1.0;
+    mFirstInitAnomalyReason = "none";
     mLastAlignmentEvent = "none";
     mLastAlignmentRotationDeg = 0.0;
     mLastAlignmentScale = 1.0;
@@ -782,9 +940,50 @@ void LocalMapping::Run()
                             mpCurrentKeyFrame, &mbAbortBA, mpCurrentKeyFrame->GetMap(),
                             num_FixedKF_BA, num_OptKF_BA, num_MPs_BA, num_edges_BA, bLarge,
                             !mpCurrentKeyFrame->GetMap()->GetIniertialBA2(), &iba_diagnostic);
-                        LogLocalInertialBA(before_inertial_ba,
-                                           CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame),
-                                           iba_diagnostic, since_viba_sec, since_viba_kfs);
+                        const InertialUpdateSnapshot after_inertial_ba =
+                            CaptureInertialUpdateSnapshot(this, mpCurrentKeyFrame);
+                        LogLocalInertialBA(before_inertial_ba, after_inertial_ba, iba_diagnostic,
+                                           since_viba_sec, since_viba_kfs);
+                        const double visual_ratio = iba_diagnostic.visual_chi2_before > 1e-9
+                                                        ? iba_diagnostic.visual_chi2_after /
+                                                              iba_diagnostic.visual_chi2_before
+                                                        : 1.0;
+                        const double inertial_ratio = iba_diagnostic.inertial_chi2_before > 1e-9
+                                                          ? iba_diagnostic.inertial_chi2_after /
+                                                                iba_diagnostic.inertial_chi2_before
+                                                          : 1.0;
+                        mMaxInitScaleDeviation = std::max(mMaxInitScaleDeviation,
+                                                          std::abs(after_inertial_ba.scale - 1.0));
+                        mMaxInitAccelBiasNorm =
+                            std::max(mMaxInitAccelBiasNorm,
+                                     static_cast<double>(after_inertial_ba.accel_bias.norm()));
+                        mMaxInitGyroBiasNorm =
+                            std::max(mMaxInitGyroBiasNorm,
+                                     static_cast<double>(after_inertial_ba.gyro_bias.norm()));
+                        mMaxInitVelocityNorm =
+                            std::max(mMaxInitVelocityNorm,
+                                     static_cast<double>(after_inertial_ba.velocity.norm()));
+                        mWorstInitVisualChi2Ratio =
+                            std::max(mWorstInitVisualChi2Ratio, visual_ratio);
+                        mWorstInitInertialChi2Ratio =
+                            std::max(mWorstInitInertialChi2Ratio, inertial_ratio);
+                        const std::string iba_anomaly_reason = FirstIbaAnomalyReason(
+                            before_inertial_ba, after_inertial_ba, iba_diagnostic);
+                        if (!iba_anomaly_reason.empty())
+                        {
+                          if (mFirstInitAnomalyReason == "none")
+                            mFirstInitAnomalyReason = iba_anomaly_reason;
+                          if (!mIbaForensicLogged)
+                          {
+                            const unsigned long map_id = mpCurrentKeyFrame->GetMap()
+                                                             ? mpCurrentKeyFrame->GetMap()->GetId()
+                                                             : 0;
+                            LogIbaForensic(mInertialInitAttemptId, map_id, mInitialImuKeyframeId,
+                                           iba_anomaly_reason, before_inertial_ba,
+                                           after_inertial_ba, iba_diagnostic);
+                            mIbaForensicLogged = true;
+                          }
+                        }
                         b_doneLBA = true;
                     }
                     else
@@ -1765,6 +1964,16 @@ void LocalMapping::ResetIfRequested()
             executed_reset = true;
 
             cout << "LM: Reseting Atlas in Local Mapping..." << endl;
+            if (mInertialInitAttemptId > 0)
+            {
+              std::cout << "MI init_reset_summary:" << " attempts=" << mInertialInitAttemptId
+                        << " max_scale_dev=" << mMaxInitScaleDeviation
+                        << " max_ba=" << mMaxInitAccelBiasNorm << " max_bg=" << mMaxInitGyroBiasNorm
+                        << " max_vel=" << mMaxInitVelocityNorm
+                        << " worst_chi_v_ratio=" << mWorstInitVisualChi2Ratio
+                        << " worst_chi_i_ratio=" << mWorstInitInertialChi2Ratio
+                        << " first_anomaly=" << mFirstInitAnomalyReason << std::endl;
+            }
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
             mbResetRequested = false;
@@ -1777,6 +1986,14 @@ void LocalMapping::ResetIfRequested()
             mbBadImu = false;
             mLastInitLifecycleCommitted = false;
             mFinalInitEpochValid = false;
+            mIbaForensicLogged = false;
+            mMaxInitScaleDeviation = 0.0;
+            mMaxInitAccelBiasNorm = 0.0;
+            mMaxInitGyroBiasNorm = 0.0;
+            mMaxInitVelocityNorm = 0.0;
+            mWorstInitVisualChi2Ratio = 1.0;
+            mWorstInitInertialChi2Ratio = 1.0;
+            mFirstInitAnomalyReason = "none";
 
             mIdxInit=0;
 
@@ -1786,6 +2003,16 @@ void LocalMapping::ResetIfRequested()
         if(mbResetRequestedActiveMap) {
             executed_reset = true;
             cout << "LM: Reseting current map in Local Mapping..." << endl;
+            if (mInertialInitAttemptId > 0)
+            {
+              std::cout << "MI init_reset_summary:" << " attempts=" << mInertialInitAttemptId
+                        << " max_scale_dev=" << mMaxInitScaleDeviation
+                        << " max_ba=" << mMaxInitAccelBiasNorm << " max_bg=" << mMaxInitGyroBiasNorm
+                        << " max_vel=" << mMaxInitVelocityNorm
+                        << " worst_chi_v_ratio=" << mWorstInitVisualChi2Ratio
+                        << " worst_chi_i_ratio=" << mWorstInitInertialChi2Ratio
+                        << " first_anomaly=" << mFirstInitAnomalyReason << std::endl;
+            }
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
 
@@ -1796,6 +2023,14 @@ void LocalMapping::ResetIfRequested()
             mbBadImu = false;
             mLastInitLifecycleCommitted = false;
             mFinalInitEpochValid = false;
+            mIbaForensicLogged = false;
+            mMaxInitScaleDeviation = 0.0;
+            mMaxInitAccelBiasNorm = 0.0;
+            mMaxInitGyroBiasNorm = 0.0;
+            mMaxInitVelocityNorm = 0.0;
+            mWorstInitVisualChi2Ratio = 1.0;
+            mWorstInitInertialChi2Ratio = 1.0;
+            mFirstInitAnomalyReason = "none";
 
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
@@ -1882,6 +2117,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
       ++mInertialInitAttemptId;
       mLastInitLifecycleCommitted = false;
       mFinalInitEpochValid = false;
+      mIbaForensicLogged = false;
     }
 
     bInitializing = true;

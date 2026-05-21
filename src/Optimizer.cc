@@ -2904,6 +2904,7 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
     float err = optimizer.activeRobustChi2();
     double visualChi2Before = 0.0;
     double inertialChi2Before = 0.0;
+    std::vector<double> inertialChi2BeforeByIndex(vei.size(), 0.0);
     for (size_t i = 0, iend = vpEdgesMono.size(); i < iend; i++)
       visualChi2Before += vpEdgesMono[i]->chi2();
     for (size_t i = 0, iend = vpEdgesStereo.size(); i < iend; i++)
@@ -2911,11 +2912,20 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
     for (size_t i = 0, iend = vei.size(); i < iend; i++)
     {
       if (vei[i])
+      {
         inertialChi2Before += vei[i]->chi2();
+        inertialChi2BeforeByIndex[i] += vei[i]->chi2();
+      }
       if (vegr[i])
+      {
         inertialChi2Before += vegr[i]->chi2();
+        inertialChi2BeforeByIndex[i] += vegr[i]->chi2();
+      }
       if (vear[i])
+      {
         inertialChi2Before += vear[i]->chi2();
+        inertialChi2BeforeByIndex[i] += vear[i]->chi2();
+      }
     }
     optimizer.optimize(opt_it); // Originally to 2
     optimizer.computeActiveErrors();
@@ -2945,12 +2955,72 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
       diagnostic->visual_edges = vpEdgesMono.size() + vpEdgesStereo.size();
       diagnostic->inertial_edges = inertialEdgeCount;
       diagnostic->bias_random_walk_edges = biasRandomWalkEdgeCount;
+      diagnostic->local_map_points = lLocalMapPoints.size();
       diagnostic->visual_chi2_before = visualChi2Before;
       diagnostic->visual_chi2_after = visualChi2After;
       diagnostic->inertial_chi2_before = inertialChi2Before;
       diagnostic->inertial_chi2_after = inertialChi2After;
       diagnostic->active_chi2_before = err;
       diagnostic->active_chi2_after = err_end;
+      diagnostic->optimized_keyframe_ids.clear();
+      diagnostic->fixed_keyframe_ids.clear();
+      diagnostic->worst_inertial_edges.clear();
+      for (KeyFrame* pKFi : vpOptimizableKFs)
+        diagnostic->optimized_keyframe_ids.push_back(pKFi ? pKFi->mnId : 0);
+      for (KeyFrame* pKFi : lFixedKeyFrames)
+        diagnostic->fixed_keyframe_ids.push_back(pKFi ? pKFi->mnId : 0);
+
+      std::vector<LocalInertialBADiagnostic::InertialEdgeDiagnostic> inertial_edges;
+      for (size_t i = 0, iend = vei.size(); i < iend; i++)
+      {
+        if (!vei[i] || i >= vpOptimizableKFs.size())
+          continue;
+
+        KeyFrame* pKFi = vpOptimizableKFs[i];
+        if (!pKFi || !pKFi->mPrevKF || !pKFi->mpImuPreintegrated)
+          continue;
+
+        IMU::Preintegrated* pInt = pKFi->mpImuPreintegrated;
+        const IMU::Bias preint_bias = pInt->GetOriginalBias();
+        const IMU::Bias current_bias = pKFi->mPrevKF->GetImuBias();
+        LocalInertialBADiagnostic::InertialEdgeDiagnostic edge;
+        edge.prev_keyframe_id = pKFi->mPrevKF->mnId;
+        edge.keyframe_id = pKFi->mnId;
+        edge.dt = pInt->dT;
+        edge.imu_samples = static_cast<int>(pInt->NumMeasurements());
+        edge.chi2_before =
+            i < inertialChi2BeforeByIndex.size() ? inertialChi2BeforeByIndex[i] : 0.0;
+        edge.chi2_after = vei[i]->chi2();
+        if (vegr[i])
+          edge.chi2_after += vegr[i]->chi2();
+        if (vear[i])
+          edge.chi2_after += vear[i]->chi2();
+        edge.dR_angle_deg =
+            std::acos(std::max(-1.0f, std::min(1.0f, (pInt->dR.trace() - 1.0f) * 0.5f))) * 180.0 /
+            M_PI;
+        edge.dV = pInt->dV;
+        edge.dP = pInt->dP;
+        edge.mean_accel = pInt->avgA;
+        edge.mean_gyro = pInt->avgW;
+        edge.preint_accel_bias = Eigen::Vector3f(preint_bias.bax, preint_bias.bay, preint_bias.baz);
+        edge.preint_gyro_bias = Eigen::Vector3f(preint_bias.bwx, preint_bias.bwy, preint_bias.bwz);
+        edge.current_accel_bias =
+            Eigen::Vector3f(current_bias.bax, current_bias.bay, current_bias.baz);
+        edge.current_gyro_bias =
+            Eigen::Vector3f(current_bias.bwx, current_bias.bwy, current_bias.bwz);
+        edge.preint_current_accel_bias_delta =
+            (edge.current_accel_bias - edge.preint_accel_bias).norm();
+        edge.preint_current_gyro_bias_delta =
+            (edge.current_gyro_bias - edge.preint_gyro_bias).norm();
+        inertial_edges.push_back(edge);
+      }
+      std::sort(inertial_edges.begin(), inertial_edges.end(),
+                [](const LocalInertialBADiagnostic::InertialEdgeDiagnostic& lhs,
+                   const LocalInertialBADiagnostic::InertialEdgeDiagnostic& rhs)
+                { return lhs.chi2_after > rhs.chi2_after; });
+      const size_t nWorstEdges = std::min<size_t>(3, inertial_edges.size());
+      diagnostic->worst_inertial_edges.assign(inertial_edges.begin(),
+                                              inertial_edges.begin() + nWorstEdges);
     }
 
     vector<pair<KeyFrame*,MapPoint*> > vToErase;
@@ -3014,6 +3084,10 @@ void Optimizer::LocalInertialBA(KeyFrame* pKF,
             pMPi->EraseObservation(pKFi);
         }
     }
+
+    if (diagnostic)
+      diagnostic->visual_inliers_after =
+          static_cast<int>(vpEdgesMono.size() + vpEdgesStereo.size() - vToErase.size());
 
     for(list<KeyFrame*>::iterator lit=lFixedKeyFrames.begin(), lend=lFixedKeyFrames.end(); lit!=lend; lit++)
         (*lit)->mnBAFixedForKF = 0;

@@ -110,6 +110,14 @@ public:
     unsigned long mInertialInitAttemptId;
     bool mLastInitLifecycleCommitted;
     bool mFinalInitEpochValid;
+    bool mIbaForensicLogged;
+    double mMaxInitScaleDeviation;
+    double mMaxInitAccelBiasNorm;
+    double mMaxInitGyroBiasNorm;
+    double mMaxInitVelocityNorm;
+    double mWorstInitVisualChi2Ratio;
+    double mWorstInitInertialChi2Ratio;
+    std::string mFirstInitAnomalyReason;
     std::string mLastAlignmentEvent;
     double mLastAlignmentRotationDeg;
     double mLastAlignmentScale;

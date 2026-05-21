@@ -48,17 +48,44 @@ class Optimizer
 public:
   struct LocalInertialBADiagnostic
   {
+    struct InertialEdgeDiagnostic
+    {
+      unsigned long prev_keyframe_id = 0;
+      unsigned long keyframe_id = 0;
+      float dt = 0.0f;
+      int imu_samples = 0;
+      double chi2_before = 0.0;
+      double chi2_after = 0.0;
+      double dR_angle_deg = 0.0;
+      Eigen::Vector3f dV = Eigen::Vector3f::Zero();
+      Eigen::Vector3f dP = Eigen::Vector3f::Zero();
+      Eigen::Vector3f mean_accel = Eigen::Vector3f::Zero();
+      Eigen::Vector3f mean_gyro = Eigen::Vector3f::Zero();
+      Eigen::Vector3f preint_accel_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f preint_gyro_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f current_accel_bias = Eigen::Vector3f::Zero();
+      Eigen::Vector3f current_gyro_bias = Eigen::Vector3f::Zero();
+      float preint_current_accel_bias_delta = 0.0f;
+      float preint_current_gyro_bias_delta = 0.0f;
+      bool crosses_init_boundary = false;
+    };
+
     int optimized_keyframes = 0;
     int fixed_keyframes = 0;
     int visual_edges = 0;
     int inertial_edges = 0;
     int bias_random_walk_edges = 0;
+    int local_map_points = 0;
+    int visual_inliers_after = 0;
     double visual_chi2_before = 0.0;
     double visual_chi2_after = 0.0;
     double inertial_chi2_before = 0.0;
     double inertial_chi2_after = 0.0;
     double active_chi2_before = 0.0;
     double active_chi2_after = 0.0;
+    std::vector<unsigned long> optimized_keyframe_ids;
+    std::vector<unsigned long> fixed_keyframe_ids;
+    std::vector<InertialEdgeDiagnostic> worst_inertial_edges;
   };
 
     void static BundleAdjustment(const std::vector<KeyFrame*> &vpKF, const std::vector<MapPoint*> &vpMP,
