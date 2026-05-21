@@ -187,6 +187,64 @@ const char* Tracking::GetLastTrackingFailureReasonName() const
     return TrackingFailureReasonName(GetLastTrackingFailureReason());
 }
 
+InertialStateDiagnostic Tracking::GetInertialStateDiagnostic() const
+{
+  InertialStateDiagnostic diagnostic;
+  diagnostic.imu_initialized = mpAtlas && mpAtlas->isImuInitialized();
+  diagnostic.tracking_state = mState;
+  diagnostic.inliers = mnMatchesInliers;
+  if (mnDiagnosticsLastOptimizationInliers > 0)
+    diagnostic.inliers = mnDiagnosticsLastOptimizationInliers;
+  diagnostic.local_matches = static_cast<int>(mvpLocalMapPoints.size());
+  diagnostic.map_updated = mbMapUpdated;
+  diagnostic.used_imu_prediction = mbDiagnosticsUsedImuPrediction;
+  diagnostic.used_inertial_optimization = mbDiagnosticsUsedInertialOptimization;
+  diagnostic.valid_last_pose = mbDiagnosticsValidLastPose;
+  diagnostic.valid_visual_prediction = mbDiagnosticsValidVisualPrediction;
+  diagnostic.valid_imu_prediction = mbDiagnosticsValidImuPrediction;
+  diagnostic.valid_optimized_pose = mbDiagnosticsValidOptimizedPose;
+
+  if (mpAtlas && mpAtlas->GetCurrentMap())
+    diagnostic.map_points = static_cast<int>(mpAtlas->GetCurrentMap()->MapPointsInMap());
+
+  if (mpLocalMapper)
+  {
+    diagnostic.scale = mpLocalMapper->mScale;
+    diagnostic.inertial_init_provisional = mpLocalMapper->IsInertialInitializationProvisional();
+    diagnostic.inertial_init_committed = mpLocalMapper->IsInertialInitializationCommitted();
+    diagnostic.inertial_init_attempt_id = mpLocalMapper->mInertialInitAttemptId;
+    diagnostic.gravity_world = mpLocalMapper->mRwg * Eigen::Vector3d(0.0, 0.0, -1.0);
+    diagnostic.last_alignment_event = mpLocalMapper->mLastAlignmentEvent;
+    diagnostic.last_alignment_rotation_deg = mpLocalMapper->mLastAlignmentRotationDeg;
+    diagnostic.last_alignment_scale = mpLocalMapper->mLastAlignmentScale;
+  }
+
+  if (mLastFrame.isSet())
+  {
+    diagnostic.valid_last_pose = true;
+    diagnostic.last_pose = mLastFrame.GetPose();
+  }
+
+  if (mCurrentFrame.isSet())
+  {
+    diagnostic.valid_pose = true;
+    diagnostic.current_pose = mCurrentFrame.GetPose();
+    diagnostic.velocity = mCurrentFrame.GetVelocity();
+    diagnostic.gyro_bias = Eigen::Vector3f(mCurrentFrame.mImuBias.bwx, mCurrentFrame.mImuBias.bwy,
+                                           mCurrentFrame.mImuBias.bwz);
+    diagnostic.accel_bias = Eigen::Vector3f(mCurrentFrame.mImuBias.bax, mCurrentFrame.mImuBias.bay,
+                                            mCurrentFrame.mImuBias.baz);
+  }
+
+  if (mbDiagnosticsValidLastPose)
+    diagnostic.last_pose = mDiagnosticsLastPose;
+  diagnostic.visual_prediction_pose = mDiagnosticsVisualPredictionPose;
+  diagnostic.imu_prediction_pose = mDiagnosticsImuPredictionPose;
+  diagnostic.optimized_pose = mDiagnosticsOptimizedPose;
+
+  return diagnostic;
+}
+
 #ifdef REGISTER_TIMES
 double calcAverage(vector<double> v_times)
 {

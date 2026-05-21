@@ -104,6 +104,21 @@ public:
     bool mbNotBA1;
     bool mbNotBA2;
     bool mbBadImu;
+    unsigned long mInertialInitAttemptId;
+    bool mLastInitLifecycleCommitted;
+    std::string mLastInitAnomalyReason;
+    double mMaxInitScaleDeviation;
+    double mMaxInitAccelBiasNorm;
+    double mMaxInitGyroBiasNorm;
+    double mMaxInitVelocityNorm;
+    double mWorstInitVisualChiRatio;
+    double mWorstInitInertialChiRatio;
+    std::string mLastAlignmentEvent;
+    double mLastAlignmentRotationDeg;
+    double mLastAlignmentScale;
+
+    bool IsInertialInitializationProvisional() const;
+    bool IsInertialInitializationCommitted() const;
 
     bool mbWriteStats;
 

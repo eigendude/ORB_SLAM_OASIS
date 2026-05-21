@@ -21,16 +21,104 @@
 #define SYSTEM_H
 
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <thread>
+
+#include <Eigen/Core>
+#include <opencv2/opencv.hpp>
+#include <sophus/se3.hpp>
 #include <unistd.h>
-#include<stdio.h>
-#include<stdlib.h>
-#include<string>
-#include<thread>
-#include<opencv2/opencv.hpp>
 
 namespace ORB_SLAM3
 {
 enum class TrackingFailureReason;
+
+struct InertialStateDiagnostic
+{
+  // True when tracking intentionally ignores IMU prediction after init
+  bool visual_only_after_init = false;
+
+  // True when the active map has been marked IMU-initialized
+  bool imu_initialized = false;
+
+  // True while the first mono-inertial init is private and uncommitted
+  bool inertial_init_provisional = false;
+
+  // True when mono-inertial init has passed its commit criteria
+  bool inertial_init_committed = false;
+
+  // True when current_pose contains a valid Tcw camera pose
+  bool valid_pose = false;
+
+  // True when last_pose contains a valid previous Tcw camera pose
+  bool valid_last_pose = false;
+
+  // True when visual_prediction_pose contains a valid Tcw pose
+  bool valid_visual_prediction = false;
+
+  // True when imu_prediction_pose contains a valid Tcw pose
+  bool valid_imu_prediction = false;
+
+  // True when optimized_pose contains a valid Tcw pose
+  bool valid_optimized_pose = false;
+
+  // True if the current tracking step used IMU prediction
+  bool used_imu_prediction = false;
+
+  // True if the current tracking step used inertial optimization
+  bool used_inertial_optimization = false;
+
+  // True when the local map changed during the current tracking step
+  bool map_updated = false;
+
+  // ORB tracking state enum value for the current frame
+  int tracking_state = 0;
+
+  // Current frame inlier count after tracking or pose optimization
+  int inliers = 0;
+
+  // Number of local map points considered for current tracking
+  int local_matches = 0;
+
+  // Number of map points in the active map
+  int map_points = 0;
+
+  // Current inertial scale estimate, dimensionless
+  double scale = 1.0;
+
+  // Last inertial alignment rotation angle, in degrees
+  double last_alignment_rotation_deg = 0.0;
+
+  // Last inertial alignment scale, dimensionless
+  double last_alignment_scale = 1.0;
+
+  // Monotonic counter for first-IMU initialization attempts
+  unsigned long inertial_init_attempt_id = 0;
+
+  // Last inertial alignment lifecycle event name
+  std::string last_alignment_event;
+
+  // Unit gravity direction in world coordinates
+  Eigen::Vector3d gravity_world = Eigen::Vector3d(0.0, 0.0, -1.0);
+
+  // Current frame velocity in world coordinates, meters per second
+  Eigen::Vector3f velocity = Eigen::Vector3f::Zero();
+
+  // Current gyroscope bias, radians per second
+  Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();
+
+  // Current accelerometer bias, meters per second squared
+  Eigen::Vector3f accel_bias = Eigen::Vector3f::Zero();
+
+  // Previous, visual-predicted, IMU-predicted, optimized and current Tcw poses
+  Sophus::SE3f last_pose;
+  Sophus::SE3f visual_prediction_pose;
+  Sophus::SE3f imu_prediction_pose;
+  Sophus::SE3f optimized_pose;
+  Sophus::SE3f current_pose;
+};
 }
 
 #include "Tracking.h"
@@ -185,11 +273,14 @@ public:
     Atlas* GetAtlas() { return mpAtlas; }
     // Returns true when the active inertial map has accepted IMU initialization.
     bool IsImuInitialized() const;
+    bool IsInertialInitializationProvisional() const;
+    bool IsInertialInitializationCommitted() const;
     // Returns true when local mapping has marked the active IMU map as bad.
     bool HasBadImu() const;
     TrackingFailureReason GetLastTrackingFailureReason() const;
     double GetLastTrackingFailureTimestamp() const;
     const char* GetLastTrackingFailureReasonName() const;
+    InertialStateDiagnostic GetInertialStateDiagnostic() const;
 
     // For debugging
     double GetTimeFromIMUInit();

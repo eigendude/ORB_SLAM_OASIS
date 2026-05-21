@@ -129,6 +129,7 @@ public:
     TrackingFailureReason GetLastTrackingFailureReason() const;
     double GetLastTrackingFailureTimestamp() const;
     const char* GetLastTrackingFailureReasonName() const;
+    InertialStateDiagnostic GetInertialStateDiagnostic() const;
 
     //DEBUG
     void SaveSubTrajectory(std::string strNameFile_frames, std::string strNameFile_kf, std::string strFolder="");
@@ -361,6 +362,18 @@ protected:
     //Motion Model
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
+
+    bool mbDiagnosticsUsedImuPrediction = false;
+    bool mbDiagnosticsUsedInertialOptimization = false;
+    bool mbDiagnosticsValidLastPose = false;
+    bool mbDiagnosticsValidVisualPrediction = false;
+    bool mbDiagnosticsValidImuPrediction = false;
+    bool mbDiagnosticsValidOptimizedPose = false;
+    int mnDiagnosticsLastOptimizationInliers = 0;
+    Sophus::SE3f mDiagnosticsLastPose;
+    Sophus::SE3f mDiagnosticsVisualPredictionPose;
+    Sophus::SE3f mDiagnosticsImuPredictionPose;
+    Sophus::SE3f mDiagnosticsOptimizedPose;
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;
