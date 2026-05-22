@@ -106,7 +106,13 @@ public:
     bool mbBadImu;
     unsigned long mInertialInitAttemptId;
     bool mLastInitLifecycleCommitted;
+    bool mInertialInitProvisionalActive;
     std::string mLastInitAnomalyReason;
+    double mInertialInitProvisionalStartTime;
+    double mLastInertialInitProvisionalLogTime;
+    float mLastInertialInitProvisionalVisualDist;
+    double mLastInertialInitProvisionalScale;
+    size_t mInertialInitProvisionalStartKFs;
     double mMaxInitScaleDeviation;
     double mMaxInitAccelBiasNorm;
     double mMaxInitGyroBiasNorm;
@@ -196,6 +202,13 @@ protected:
 
     void InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
     void ScaleRefinement();
+    void ResetInertialInitLifecycleState();
+    void StartProvisionalInertialInitialization(
+        float visual_dist, float dist, int kfs, size_t map_points, int inliers);
+    void CommitInertialInitialization(
+        float visual_dist, float dist, int kfs, size_t map_points, int inliers);
+    bool CheckProvisionalInertialInitializationTimeout(
+        float visual_dist, float dist, int kfs, size_t map_points, int inliers);
 
     bool bInitializing;
 
