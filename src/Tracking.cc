@@ -44,6 +44,27 @@ namespace ORB_SLAM3
 
 namespace
 {
+// Seconds after init commit where near-threshold mono inlier misses may defer reset
+constexpr double kPostInitGraceDurationSeconds = 5.0;
+
+// Maximum number of near-miss frames allowed inside the grace window
+constexpr int kPostInitGraceMaxFrames = 4;
+
+// Minimum mono inliers required for a near miss
+constexpr int kPostInitGraceMinInliers = 10;
+
+// Fraction of the inlier threshold required for a near miss
+constexpr float kPostInitGraceMinInlierRatio = 0.65f;
+
+// Minimum projected local map candidates required for a near miss
+constexpr int kPostInitGraceMinProjected = 100;
+
+// Minimum raw tracked map points required before outlier culling
+constexpr int kPostInitGraceMinRaw = 50;
+
+// Minimum total active map points required for post-init grace
+constexpr int kPostInitGraceMinMapPoints = 500;
+
 const char* TrackingFailureReasonName(TrackingFailureReason reason)
 {
     switch(reason)
@@ -168,6 +189,67 @@ void Tracking::RecordTrackingFailure(TrackingFailureReason reason, double timest
 void Tracking::ClearTrackingFailure()
 {
     RecordTrackingFailure(TrackingFailureReason::None, -1.0);
+}
+
+void Tracking::ResetPostInitMonoInertialGrace()
+{
+  mbLastLocalMapFailureImuMonoInliers = false;
+  mnLastLocalMapFailureInliers = 0;
+  mnLastLocalMapFailureMinInliers = 0;
+  mnLastLocalMapFailureProjected = 0;
+  mnLastLocalMapFailureRaw = 0;
+  mnLastLocalMapFailureMapPoints = 0;
+}
+
+bool Tracking::ApplyPostInitMonoInertialGraceIfEligible(Map* pCurrentMap)
+{
+  if (mSensor != System::IMU_MONOCULAR || pCurrentMap == NULL || mpLocalMapper == NULL)
+    return false;
+
+  if (!pCurrentMap->isImuInitialized() || !mpLocalMapper->IsInertialInitializationCommitted() ||
+      mpLocalMapper->IsInertialInitializationProvisional() || !mbLastLocalMapFailureImuMonoInliers)
+  {
+    return false;
+  }
+
+  const double commit_time = mpLocalMapper->mInertialInitCommitTime;
+  if (commit_time != mPostInitGraceCommitTime)
+  {
+    mPostInitGraceCommitTime = commit_time;
+    mnPostInitGraceUsed = 0;
+  }
+
+  const double age_s = commit_time >= 0.0 ? mCurrentFrame.mTimeStamp - commit_time : -1.0;
+  const bool inside_window = age_s >= 0.0 && age_s <= kPostInitGraceDurationSeconds;
+  const bool near_threshold =
+      mnLastLocalMapFailureInliers >= kPostInitGraceMinInliers &&
+      mnLastLocalMapFailureInliers >=
+          static_cast<int>(std::ceil(kPostInitGraceMinInlierRatio *
+                                     static_cast<float>(mnLastLocalMapFailureMinInliers)));
+  const bool strong_projection = mnLastLocalMapFailureProjected >= kPostInitGraceMinProjected &&
+                                 mnLastLocalMapFailureRaw >= kPostInitGraceMinRaw &&
+                                 mnLastLocalMapFailureMapPoints >= kPostInitGraceMinMapPoints;
+
+  if (!inside_window || !near_threshold || !strong_projection)
+    return false;
+
+  if (mnPostInitGraceUsed >= kPostInitGraceMaxFrames)
+  {
+    cout << "MI post_init_grace_exhausted: reason=imu_mono_inliers"
+         << " inl=" << mnLastLocalMapFailureInliers << "/" << mnLastLocalMapFailureMinInliers
+         << " proj=" << mnLastLocalMapFailureProjected << " raw=" << mnLastLocalMapFailureRaw
+         << " map=" << mnLastLocalMapFailureMapPoints << " age_s=" << age_s
+         << " used=" << mnPostInitGraceUsed << " action=reset" << endl;
+    return false;
+  }
+
+  ++mnPostInitGraceUsed;
+  cout << "MI post_init_grace: reason=imu_mono_inliers" << " inl=" << mnLastLocalMapFailureInliers
+       << "/" << mnLastLocalMapFailureMinInliers << " proj=" << mnLastLocalMapFailureProjected
+       << " raw=" << mnLastLocalMapFailureRaw << " map=" << mnLastLocalMapFailureMapPoints
+       << " age_s=" << age_s << " used=" << mnPostInitGraceUsed
+       << " max=" << kPostInitGraceMaxFrames << " action=defer_reset" << endl;
+  return true;
 }
 
 TrackingFailureReason Tracking::GetLastTrackingFailureReason() const
@@ -2286,11 +2368,13 @@ void Tracking::Track()
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
+                  if (!ApplyPostInitMonoInertialGraceIfEligible(pCurrentMap))
+                  {
                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
-                    RecordTrackingFailure(
-                        TrackingFailureReason::RecentlyInitializedImuTrackingLost,
-                        mCurrentFrame.mTimeStamp);
+                    RecordTrackingFailure(TrackingFailureReason::RecentlyInitializedImuTrackingLost,
+                                          mCurrentFrame.mTimeStamp);
                     mpSystem->ResetActiveMap();
+                  }
                 }
 
                 mState=RECENTLY_LOST;
@@ -3092,23 +3176,24 @@ bool Tracking::TrackWithMotionModel()
 
 bool Tracking::TrackLocalMap()
 {
+  ResetPostInitMonoInertialGrace();
 
-    // We have an estimation of the camera pose and some map points tracked in the frame.
-    // We retrieve the local map and try to find matches to points in the local map.
-    mTrackedFr++;
+  // We have an estimation of the camera pose and some map points tracked in the frame.
+  // We retrieve the local map and try to find matches to points in the local map.
+  mTrackedFr++;
 
-    UpdateLocalMap();
-    SearchLocalPoints();
+  UpdateLocalMap();
+  SearchLocalPoints();
 
-    // TOO check outliers before PO
-    int aux1 = 0, aux2=0;
-    for(int i=0; i<mCurrentFrame.N; i++)
-        if( mCurrentFrame.mvpMapPoints[i])
-        {
-            aux1++;
-            if(mCurrentFrame.mvbOutlier[i])
-                aux2++;
-        }
+  // TOO check outliers before PO
+  int aux1 = 0, aux2 = 0;
+  for (int i = 0; i < mCurrentFrame.N; i++)
+    if (mCurrentFrame.mvpMapPoints[i])
+    {
+      aux1++;
+      if (mCurrentFrame.mvbOutlier[i])
+        aux2++;
+    }
 
     int optimizerInliers = -1;
     if (!mpAtlas->isImuInitialized())
@@ -3227,6 +3312,18 @@ bool Tracking::TrackLocalMap()
     {
         if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
         {
+          if (mpAtlas->isImuInitialized())
+          {
+            mbLastLocalMapFailureImuMonoInliers = true;
+            mnLastLocalMapFailureInliers = mnMatchesInliers;
+            mnLastLocalMapFailureMinInliers = 15;
+            mnLastLocalMapFailureProjected = aux1;
+            mnLastLocalMapFailureRaw = rawTrackedBeforeOutlierCull;
+            mnLastLocalMapFailureMapPoints =
+                mpAtlas->GetCurrentMap()
+                    ? static_cast<int>(mpAtlas->GetCurrentMap()->MapPointsInMap())
+                    : 0;
+          }
           logTrackFail("imu_mono_inliers", mpAtlas->isImuInitialized() ? 15 : 50);
           return false;
         }

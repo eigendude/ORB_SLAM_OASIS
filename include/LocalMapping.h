@@ -113,6 +113,7 @@ public:
     float mLastInertialInitProvisionalVisualDist;
     double mLastInertialInitProvisionalScale;
     size_t mInertialInitProvisionalStartKFs;
+    double mInertialInitCommitTime;
     double mMaxInitScaleDeviation;
     double mMaxInitAccelBiasNorm;
     double mMaxInitGyroBiasNorm;

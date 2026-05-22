@@ -256,6 +256,8 @@ protected:
 
     // Perform preintegration from last frame
     void PreintegrateIMU();
+    bool ApplyPostInitMonoInertialGraceIfEligible(Map* pCurrentMap);
+    void ResetPostInitMonoInertialGrace();
 
     // Reset IMU biases and compute frame velocity
     void ResetFrameIMU();
@@ -405,6 +407,14 @@ protected:
     TrackingFailureReason mLastTrackingFailureReason =
         TrackingFailureReason::None;
     double mLastTrackingFailureTimestamp = -1.0;
+    bool mbLastLocalMapFailureImuMonoInliers = false;
+    int mnLastLocalMapFailureInliers = 0;
+    int mnLastLocalMapFailureMinInliers = 0;
+    int mnLastLocalMapFailureProjected = 0;
+    int mnLastLocalMapFailureRaw = 0;
+    int mnLastLocalMapFailureMapPoints = 0;
+    int mnPostInitGraceUsed = 0;
+    double mPostInitGraceCommitTime = -1.0;
 
 #ifdef REGISTER_LOOP
     bool Stop();

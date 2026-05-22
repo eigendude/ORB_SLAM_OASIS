@@ -145,6 +145,7 @@ LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, 
     mLastInertialInitProvisionalVisualDist = -1.0f;
     mLastInertialInitProvisionalScale = 1.0;
     mInertialInitProvisionalStartKFs = 0;
+    mInertialInitCommitTime = -1.0;
     mMaxInitScaleDeviation = 0.0;
     mMaxInitAccelBiasNorm = 0.0;
     mMaxInitGyroBiasNorm = 0.0;
@@ -201,6 +202,7 @@ void LocalMapping::ResetInertialInitLifecycleState()
   mLastInertialInitProvisionalVisualDist = -1.0f;
   mLastInertialInitProvisionalScale = 1.0;
   mInertialInitProvisionalStartKFs = 0;
+  mInertialInitCommitTime = -1.0;
 }
 
 void LocalMapping::StartProvisionalInertialInitialization(
@@ -239,6 +241,7 @@ void LocalMapping::CommitInertialInitialization(
   mLastInitAnomalyReason = "none";
   mLastInertialInitProvisionalVisualDist = visual_dist;
   mLastInertialInitProvisionalScale = mScale;
+  mInertialInitCommitTime = now;
 
   cout << "MI init_committed: reason=motion_proven" << " scale=" << mScale
        << " visual_dist=" << visual_dist << " dist=" << dist << " ba=" << mba.norm()
